@@ -1,0 +1,92 @@
+# KAG-LangGraph Pipeline Configuration
+# This is an example configuration file showing all available options
+
+pipeline:
+  # Pipeline metadata
+  name: "Example Knowledge Graph Pipeline"
+  description: "Complete pipeline for extracting knowledge graphs from documents"
+  version: "1.0"
+
+  # Global execution settings
+  max_workers: 4
+  batch_size: 100
+  timeout: 3600  # 1 hour timeout
+
+  # Component configurations
+  components:
+    # Scanner: Discovers input files
+    scanner:
+      type: "file_scanner"
+      enabled: true
+      config:
+        verify_exists: true
+
+    # Reader: Extracts text from documents
+    reader:
+      type: "mixed_reader"
+      enabled: true
+      config:
+        supported_types: ["pdf", "txt", "docx", "md"]
+        default_encoding: "utf-8"
+
+    # Splitter: Breaks documents into chunks
+    splitter:
+      type: "length_splitter"
+      enabled: true
+      config:
+        chunk_size: 1000
+        chunk_overlap: 100
+        split_by: "character"
+        separators: ["\n\n", "\n", ". ", " "]
+        keep_separator: false
+
+    # Extractor: Extracts entities and relationships
+    extractor:
+      type: "llm_extractor"
+      enabled: true
+      config:
+        llm_provider: "openai"
+        model: "gpt-3.5-turbo"
+        api_key: "${OPENAI_API_KEY}"  # Environment variable reference
+        temperature: 0.1
+        max_tokens: 2000
+        entity_types:
+          - "Person"
+          - "Organization"
+          - "Location"
+          - "Concept"
+        relation_types:
+          - "works_for"
+          - "located_in"
+          - "related_to"
+          - "part_of"
+        batch_size: 5
+
+    # Vectorizer: Creates embeddings for semantic search
+    vectorizer:
+      type: "embedding_vectorizer"
+      enabled: true
+      config:
+        model_name: "all-MiniLM-L6-v2"
+        batch_size: 32
+        max_length: 512
+        normalize_embeddings: true
+        embed_nodes: true
+        embed_edges: false
+        node_text_template: "{name} is a {type}. {description}"
+
+    # Writer: Outputs the knowledge graph
+    writer:
+      type: "json_writer"
+      enabled: true
+      config:
+        output_path: "./output/knowledge_graph.json"
+        pretty_print: true
+        include_metadata: true
+        separate_files: false
+
+  # Global configuration values
+  global_config:
+    log_level: "INFO"
+    output_dir: "./output"
+    temp_dir: "./temp"

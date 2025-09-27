@@ -1,0 +1,47 @@
+{
+  "pipeline": {
+    "components": {
+      "scanner": {
+        "type": "file_scanner",
+        "enabled": true
+      },
+      "reader": {
+        "type": "pdf_reader",
+        "enabled": true
+      },
+      "splitter": {
+        "type": "semantic_splitter",
+        "enabled": true,
+        "config": {
+          "chunk_size": 1000,
+          "chunk_overlap": 100
+        }
+      },
+      "extractor": {
+        "type": "llm_extractor",
+        "enabled": true,
+        "config": {
+          "llm_provider": "openai",
+          "model": "gpt-3.5-turbo",
+          "api_key": "${OPENAI_API_KEY}",
+          "temperature": 0.1,
+          "max_tokens": 2000,
+          "extraction_schema": "./kag_langgraph/schema/sample.schema"
+        }
+      },
+      "vectorizer": {
+        "type": "no_op_vectorizer",
+        "enabled": true
+      },
+      "writer": {
+        "type": "json_writer",
+        "enabled": true,
+        "config": {
+          "output_path": "./output/sample_schema_knowledge_graph.json",
+          "pretty_print": true,
+          "include_metadata": true
+        }
+      }
+    }
+  }
+}

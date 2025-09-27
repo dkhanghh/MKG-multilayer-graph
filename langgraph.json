@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "kag_pipeline": "./sever.py:graph"
+  },
+  "env": ".env"
+}
