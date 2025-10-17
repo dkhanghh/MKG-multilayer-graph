@@ -126,8 +126,8 @@ class TemplateLoader:
             Rendered prompt string
         """
         variables = {
-            "schema": json.dumps(schema, indent=2) if schema else "{}",
-            "input": input_text,
+            "schema": schema if schema else {},
+            "input_text": input_text,
             **kwargs
         }
         

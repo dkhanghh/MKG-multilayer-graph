@@ -6,7 +6,7 @@ structured knowledge extracted from documents.
 """
 
 from typing import Dict, Any, List, Optional, Set, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import json
 import uuid
 
@@ -20,19 +20,20 @@ class Node(BaseModel):
     
     id: str = Field(..., description="Unique identifier for the node")
     name: str = Field(..., description="Display name of the entity")
-    node_type: str = Field(..., description="Type/category of the entity (e.g., Person, Organization)")
-    
+    label: str = Field(..., description="The type/category of the node - defines what kind of entity this node represents (e.g., 'Person', 'Company', 'Location')")
+
     # Entity properties
     properties: Dict[str, Any] = Field(default_factory=dict, description="Additional properties of the entity")
+    official_name: str = Field(..., description="Official/canonical name for the entity")
     aliases: List[str] = Field(default_factory=list, description="Alternative names for the entity")
-    
+
     # Context and source information
     source_chunks: List[str] = Field(default_factory=list, description="IDs of chunks where this entity was mentioned")
     confidence: Optional[float] = Field(None, description="Confidence score for entity extraction")
-    
+
     # Embeddings and vectors
-    embeddings: Optional[List[float]] = Field(None, description="Entity embeddings")
-    
+    embeddings: Optional[List[float]] = Field(None, description="Entity embeddings for full node text")
+
     # Processing metadata
     extraction_metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata from extraction process")
     
@@ -84,8 +85,9 @@ class Node(BaseModel):
         return {
             "id": self.id,
             "name": self.name,
-            "node_type": self.node_type,
+            "label": self.label,
             "properties": self.properties,
+            "official_name": self.official_name,
             "aliases": self.aliases,
             "source_chunks": self.source_chunks,
             "confidence": self.confidence,
@@ -107,60 +109,94 @@ class Node(BaseModel):
         return isinstance(other, Node) and self.id == other.id
     
     def __str__(self) -> str:
-        return f"Node(id='{self.id}', name='{self.name}', type='{self.node_type}')"
-    
+        return f"Node(id='{self.id}', name='{self.name}', label='{self.label}')"
+
     def __repr__(self) -> str:
-        return f"Node(id='{self.id}', name='{self.name}', type='{self.node_type}', properties={len(self.properties)})"
+        return f"Node(id='{self.id}', name='{self.name}', label='{self.label}', properties={len(self.properties)})"
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class Edge(BaseModel):
     """
     Represents an edge (relationship) in a knowledge graph.
-    
+
     Edges connect two nodes and represent relationships between entities.
+
+    SPG (Semantic Property Graph) Support:
+    - Edges can have rich properties (edgeProperties) as defined in schema
+    - Examples:
+      * REPORTED_FINANCIALS: {period, revenue, profit, expenses, ...}
+      * OWNS: {ownershipPercent, acquiredDate, isSubsidiary}
+      * EMPLOYS: {hireDate, salary, isCurrentEmployee}
+    - All edge properties are stored in the 'properties' dict
     """
-    
+
     id: str = Field(..., description="Unique identifier for the edge")
     source_id: str = Field(..., description="ID of the source node")
     target_id: str = Field(..., description="ID of the target node")
-    relation_type: str = Field(..., description="Type of relationship (e.g., 'works_for', 'located_in')")
-    
-    # Relationship properties
-    properties: Dict[str, Any] = Field(default_factory=dict, description="Additional properties of the relationship")
-    
+    relation_type: str = Field(..., description="Type of relationship (e.g., 'REPORTED_FINANCIALS', 'OWNS', 'EMPLOYS')")
+
+    # Relationship properties (SPG edge properties)
+    properties: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Edge properties - can contain rich semantic data in SPG model (e.g., financial metrics, temporal data, contextual info)"
+    )
+
     # Direction and weight
     directed: bool = Field(True, description="Whether the relationship is directed")
     weight: Optional[float] = Field(None, description="Weight or strength of the relationship")
-    
+
     # Context and source information
     source_chunks: List[str] = Field(default_factory=list, description="IDs of chunks where this relationship was mentioned")
     confidence: Optional[float] = Field(None, description="Confidence score for relationship extraction")
-    
+
     # Processing metadata
     extraction_metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata from extraction process")
     
     def add_property(self, key: str, value: Any) -> None:
         """
-        Add a property to the edge.
-        
+        Add a property to the edge (SPG edge property).
+
         Args:
-            key: Property name
+            key: Property name (e.g., 'revenue', 'period', 'ownershipPercent')
             value: Property value
         """
         self.properties[key] = value
-    
+
+    def add_properties(self, properties: Dict[str, Any]) -> None:
+        """
+        Add multiple properties to the edge at once (SPG edge properties).
+
+        Args:
+            properties: Dictionary of edge properties
+        """
+        self.properties.update(properties)
+
     def get_property(self, key: str, default: Any = None) -> Any:
         """
         Get a property value.
-        
+
         Args:
             key: Property name
             default: Default value if property doesn't exist
-            
+
         Returns:
             Property value or default
         """
         return self.properties.get(key, default)
+
+    def has_spg_properties(self) -> bool:
+        """
+        Check if this edge has SPG-style rich properties.
+
+        Returns:
+            True if edge has properties beyond basic metadata
+        """
+        # Filter out standard metadata properties
+        metadata_keys = {"relationship_category", "is_taxonomy", "description"}
+        spg_properties = {k: v for k, v in self.properties.items() if k not in metadata_keys}
+        return len(spg_properties) > 0
     
     def add_source_chunk(self, chunk_id: str) -> None:
         """

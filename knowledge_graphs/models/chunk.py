@@ -7,7 +7,7 @@ text segments extracted from documents.
 
 from enum import Enum
 from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import hashlib
 import json
 
@@ -37,9 +37,8 @@ class Chunk(BaseModel):
     id: str = Field(..., description="Unique identifier for the chunk")
     content: str = Field(..., description="Text content of the chunk")
     chunk_type: ChunkType = Field(ChunkType.TEXT, description="Type of chunk")
-    
+
     # Source information
-    source_file: Optional[str] = Field(None, description="Path to source file")
     page_number: Optional[int] = Field(None, description="Page number in source document")
     chunk_index: Optional[int] = Field(None, description="Index of chunk in document")
     
@@ -71,28 +70,27 @@ class Chunk(BaseModel):
     def hash_key(self) -> str:
         """
         Generate a hash key for this chunk based on its content and metadata.
-        
+
         Returns:
             SHA-256 hash of chunk content and key metadata
         """
         # Create a string representation of the chunk's identifying features
         key_data = {
             "content": self.content,
-            "source_file": self.source_file,
             "page_number": self.page_number,
             "chunk_index": self.chunk_index,
         }
-        
+
         # Convert to JSON string for hashing
         key_string = json.dumps(key_data, sort_keys=True)
-        
+
         # Generate SHA-256 hash
         return hashlib.sha256(key_string.encode('utf-8')).hexdigest()
     
     def to_dict(self) -> Dict[str, Any]:
         """
         Convert chunk to dictionary representation.
-        
+
         Returns:
             Dictionary representation of the chunk
         """
@@ -100,7 +98,6 @@ class Chunk(BaseModel):
             "id": self.id,
             "content": self.content,
             "chunk_type": self.chunk_type.value,
-            "source_file": self.source_file,
             "page_number": self.page_number,
             "chunk_index": self.chunk_index,
             "length": self.length,
@@ -174,9 +171,9 @@ class Chunk(BaseModel):
     def __repr__(self) -> str:
         """Detailed string representation of the chunk."""
         return (f"Chunk(id='{self.id}', content_length={self.length}, "
-                f"type={self.chunk_type}, source='{self.source_file}')")
+                f"type={self.chunk_type})")
     
-    class Config:
-        """Pydantic configuration."""
-        use_enum_values = True
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(
+        use_enum_values=True,
+        arbitrary_types_allowed=True
+    )

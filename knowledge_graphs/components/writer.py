@@ -370,16 +370,16 @@ class CSVWriter(Writer):
             # Create empty file
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(["id", "name", "node_type", "properties", "source_chunks"])
+                writer.writerow(["id", "name", "label", "official_name", "source_chunks", "confidence"])
             return str(output_path)
-        
+
         # Determine all property keys
         all_property_keys = set()
         for node in nodes:
             all_property_keys.update(node.properties.keys())
-        
+
         # Create CSV header
-        header = ["id", "name", "node_type", "aliases", "source_chunks", "confidence"]
+        header = ["id", "name", "label", "official_name", "source_chunks", "confidence"]
         
         # Add property columns
         property_columns = sorted(all_property_keys)
@@ -398,8 +398,8 @@ class CSVWriter(Writer):
                 row = [
                     node.id,
                     node.name,
-                    node.node_type,
-                    "|".join(node.aliases) if node.aliases else "",
+                    node.label,
+                    node.official_name or "",
                     "|".join(node.source_chunks) if node.source_chunks else "",
                     node.confidence or ""
                 ]
@@ -580,10 +580,10 @@ class Neo4jWriter(Writer):
     def process(self, state: PipelineState) -> PipelineState:
         """
         Write knowledge graph to Neo4j database.
-        
+
         Args:
             state: Current pipeline state
-            
+
         Returns:
             Updated pipeline state with output path (connection info)
         """
@@ -593,60 +593,173 @@ class Neo4jWriter(Writer):
             updated_state = state.copy()
             updated_state["output_path"] = ""
             return updated_state
-        
+
         # Configuration
         database = self.get_config_value("database", "neo4j")
         clear_database = self.get_config_value("clear_database", False)
         batch_size = self.get_config_value("batch_size", 1000)
-        
+
         # Merge all subgraphs
         merged_graph = self._merge_subgraphs(subgraphs)
-        
+
+        # Get chunks from pipeline state
+        chunks = state.get("split_chunks", state.get("chunks", []))
+        chunk_map = {chunk.id: chunk for chunk in chunks} if chunks else {}
+
         try:
             with self.driver.session(database=database) as session:
                 # Clear database if requested
                 if clear_database:
                     session.run("MATCH (n) DETACH DELETE n")
                     logger.info("Cleared Neo4j database")
-                
-                # Write nodes in batches
+
+                # Write chunk nodes first
+                chunks_written = self._write_chunks_to_neo4j(
+                    session, chunk_map, batch_size
+                )
+
+                # Write entity nodes in batches
                 nodes_written = self._write_nodes_to_neo4j(
                     session, merged_graph.nodes, batch_size
                 )
-                
+
                 # Write edges in batches
                 edges_written = self._write_edges_to_neo4j(
                     session, merged_graph.edges, batch_size
                 )
-                
-                logger.info(f"Wrote {nodes_written} nodes and {edges_written} edges to Neo4j")
-            
+
+                # Create source relationships from chunks to entities
+                source_rels_written = self._write_chunk_source_relationships(
+                    session, merged_graph.nodes, batch_size
+                )
+
+                logger.info(f"Wrote {chunks_written} chunks, {nodes_written} nodes, {edges_written} edges, and {source_rels_written} source relationships to Neo4j")
+
             output_path = f"neo4j://{self.get_config_value('username')}@{self.get_config_value('uri').split('//')[-1]}/{database}"
-        
+
         except Exception as e:
             logger.error(f"Error writing to Neo4j: {e}")
             output_path = ""
-        
+
         # Update state
         updated_state = state.copy()
         updated_state["output_path"] = output_path
-        
+
         return updated_state
-    
+
     def _merge_subgraphs(self, subgraphs: List[SubGraph]) -> SubGraph:
         """Merge multiple subgraphs into one."""
         if not subgraphs:
             return SubGraph()
-        
+
         if len(subgraphs) == 1:
             return subgraphs[0]
-        
+
         merged = subgraphs[0]
         for subgraph in subgraphs[1:]:
             merged = merged.merge(subgraph)
-        
+
         return merged
-    
+
+    def _write_chunks_to_neo4j(self, session, chunk_map: Dict[str, Any], batch_size: int) -> int:
+        """
+        Write Chunk nodes to Neo4j in batches.
+
+        Args:
+            session: Neo4j session
+            chunk_map: Dictionary mapping chunk IDs to Chunk objects
+            batch_size: Batch size
+
+        Returns:
+            Number of chunks written
+        """
+        if not chunk_map:
+            logger.info("No chunks to write")
+            return 0
+
+        chunks_written = 0
+        chunk_list = list(chunk_map.values())
+
+        for i in range(0, len(chunk_list), batch_size):
+            batch = chunk_list[i:i + batch_size]
+
+            # Prepare chunk data for batch
+            chunk_data = []
+            for chunk in batch:
+                chunk_dict = {
+                    "id": chunk.id,
+                    "content": chunk.content,
+                    "chunk_type": chunk.chunk_type.value if hasattr(chunk.chunk_type, 'value') else str(chunk.chunk_type),
+                    "length": chunk.length,
+                    "word_count": chunk.word_count
+                }
+
+                # Add optional fields
+                if chunk.page_number is not None:
+                    chunk_dict["page_number"] = chunk.page_number
+                if chunk.chunk_index is not None:
+                    chunk_dict["chunk_index"] = chunk.chunk_index
+                if chunk.language:
+                    chunk_dict["language"] = chunk.language
+
+                chunk_data.append(chunk_dict)
+
+            # Create Chunk nodes in Neo4j
+            cypher = """
+            UNWIND $chunks as chunkData
+            MERGE (c:Chunk {id: chunkData.id})
+            SET c += chunkData
+            """
+
+            session.run(cypher, chunks=chunk_data)
+            chunks_written += len(batch)
+
+        return chunks_written
+
+    def _write_chunk_source_relationships(self, session, nodes: List[Node], batch_size: int) -> int:
+        """
+        Create source relationships from Chunk nodes to Entity nodes.
+
+        Args:
+            session: Neo4j session
+            nodes: List of entity nodes
+            batch_size: Batch size
+
+        Returns:
+            Number of relationships written
+        """
+        relationships_written = 0
+
+        # Collect all chunk-entity pairs
+        chunk_entity_pairs = []
+        for node in nodes:
+            if node.source_chunks:
+                for chunk_id in node.source_chunks:
+                    chunk_entity_pairs.append({
+                        "chunk_id": chunk_id,
+                        "entity_id": node.id
+                    })
+
+        if not chunk_entity_pairs:
+            logger.info("No chunk-entity relationships to write")
+            return 0
+
+        # Write relationships in batches
+        for i in range(0, len(chunk_entity_pairs), batch_size):
+            batch = chunk_entity_pairs[i:i + batch_size]
+
+            cypher = """
+            UNWIND $pairs as pair
+            MATCH (c:Chunk {id: pair.chunk_id})
+            MATCH (e:Entity {id: pair.entity_id})
+            MERGE (c)-[r:SOURCE]->(e)
+            """
+
+            session.run(cypher, pairs=batch)
+            relationships_written += len(batch)
+
+        return relationships_written
+
     def _write_nodes_to_neo4j(self, session, nodes: List[Node], batch_size: int) -> int:
         """
         Write nodes to Neo4j in batches.
@@ -670,9 +783,9 @@ class Neo4jWriter(Writer):
                 node_dict = {
                     "id": node.id,
                     "name": node.name,
-                    "node_type": node.node_type
+                    "label": node.label
                 }
-                
+
                 # Add properties
                 if node.properties:
                     # Filter out complex objects that Neo4j can't store directly
@@ -685,50 +798,84 @@ class Neo4jWriter(Writer):
                         else:
                             # Convert complex objects to strings
                             simple_props[key] = str(value)
-                    
+
                     node_dict.update(simple_props)
-                
+
                 # Add metadata
-                if node.aliases:
-                    node_dict["aliases"] = node.aliases
+                if node.official_name:
+                    node_dict["official_name"] = node.official_name
                 if node.source_chunks:
                     node_dict["source_chunks"] = node.source_chunks
                 if node.confidence is not None:
                     node_dict["confidence"] = node.confidence
-                
+
+                # Add embeddings
+                if node.embeddings:
+                    node_dict["embeddings"] = node.embeddings
+
                 node_data.append(node_dict)
             
-            # Create nodes in Neo4j
-            cypher = """
-            UNWIND $nodes as nodeData
-            MERGE (n {id: nodeData.id})
-            SET n += nodeData
-            SET n:Entity
-            SET n:` + nodeData.node_type + `
-            """
-            
-            session.run(cypher, nodes=node_data)
-            nodes_written += len(batch)
+            # Create nodes in Neo4j with dynamic labels
+            # We need to set labels per node since each can have a different category
+            for node in node_data:
+                label = node.get("label", "Entity")
+                # Sanitize label to be a valid Neo4j label (alphanumeric and underscore only)
+                sanitized_label = ''.join(c if c.isalnum() or c == '_' else '_' for c in label)
+
+                # Each entity gets two labels: :Entity (base) and category-specific (e.g., :Laboratory)
+                cypher = f"""
+                MERGE (n:Entity {{id: $nodeData.id}})
+                SET n += $nodeData
+                SET n:{sanitized_label}
+                """
+
+                session.run(cypher, nodeData=node)
+                nodes_written += 1
         
         return nodes_written
     
     def _write_edges_to_neo4j(self, session, edges: List[Edge], batch_size: int) -> int:
         """
         Write edges to Neo4j in batches.
-        
+
+        Handles three types of relationships:
+        1. isA (taxonomy): Creates relationship AND adds ConceptType as label
+        2. Schema-defined: Standard relationship creation
+        3. Discovered: Standard relationship creation
+
         Args:
             session: Neo4j session
             edges: List of edges to write
             batch_size: Batch size
-            
+
         Returns:
             Number of edges written
         """
         edges_written = 0
-        
-        for i in range(0, len(edges), batch_size):
-            batch = edges[i:i + batch_size]
-            
+
+        # Separate special relationships from regular ones
+        isa_edges = []
+        belongto_edges = []
+        regular_edges = []
+
+        for edge in edges:
+            if edge.relation_type == "isA":
+                isa_edges.append(edge)
+            elif edge.relation_type == "belongTo":
+                belongto_edges.append(edge)
+            else:
+                regular_edges.append(edge)
+
+        # Write isA relationships with special handling (Entity -> ConceptType)
+        edges_written += self._write_isa_relationships(session, isa_edges, batch_size)
+
+        # Write belongTo relationships with special handling (ConceptType -> ConceptType)
+        edges_written += self._write_belongto_relationships(session, belongto_edges, batch_size)
+
+        # Write regular relationships
+        for i in range(0, len(regular_edges), batch_size):
+            batch = regular_edges[i:i + batch_size]
+
             # Prepare edge data for batch
             edge_data = []
             for edge in batch:
@@ -739,7 +886,7 @@ class Neo4jWriter(Writer):
                     "relation_type": edge.relation_type,
                     "directed": edge.directed
                 }
-                
+
                 # Add optional properties
                 if edge.weight is not None:
                     edge_dict["weight"] = edge.weight
@@ -747,23 +894,15 @@ class Neo4jWriter(Writer):
                     edge_dict["confidence"] = edge.confidence
                 if edge.source_chunks:
                     edge_dict["source_chunks"] = edge.source_chunks
-                
-                # Add custom properties
+
+                # Add custom properties (including SPG edge properties)
                 if edge.properties:
-                    # Filter out complex objects
-                    simple_props = {}
-                    for key, value in edge.properties.items():
-                        if isinstance(value, (str, int, float, bool)):
-                            simple_props[key] = value
-                        elif isinstance(value, list) and all(isinstance(v, (str, int, float, bool)) for v in value):
-                            simple_props[key] = value
-                        else:
-                            simple_props[key] = str(value)
-                    
-                    edge_dict.update(simple_props)
-                
+                    # Convert properties for Neo4j storage
+                    neo4j_props = self._convert_edge_properties_for_neo4j(edge.properties)
+                    edge_dict.update(neo4j_props)
+
                 edge_data.append(edge_dict)
-            
+
             # Create relationships in Neo4j
             cypher = """
             UNWIND $edges as edgeData
@@ -772,7 +911,7 @@ class Neo4jWriter(Writer):
             CALL apoc.create.relationship(source, edgeData.relation_type, edgeData, target) YIELD rel
             RETURN count(rel)
             """
-            
+
             # Fallback if APOC is not available
             try:
                 session.run(cypher, edges=edge_data)
@@ -785,19 +924,184 @@ class Neo4jWriter(Writer):
                     MERGE (source)-[r:`{edge_dict['relation_type']}`]->(target)
                     SET r += $properties
                     """
-                    
-                    properties = {k: v for k, v in edge_dict.items() 
+
+                    properties = {k: v for k, v in edge_dict.items()
                                  if k not in ['source_id', 'target_id', 'relation_type']}
-                    
-                    session.run(simple_cypher, 
+
+                    session.run(simple_cypher,
                                source_id=edge_dict['source_id'],
-                               target_id=edge_dict['target_id'], 
+                               target_id=edge_dict['target_id'],
                                properties=properties)
-            
+
             edges_written += len(batch)
-        
+
         return edges_written
-    
+
+    def _convert_edge_properties_for_neo4j(self, properties: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert edge properties to Neo4j-compatible format.
+
+        Handles SPG edge properties with proper type conversion:
+        - Preserves numeric types (Float, Integer)
+        - Converts complex objects to JSON strings
+        - Handles lists appropriately
+
+        Args:
+            properties: Dictionary of edge properties
+
+        Returns:
+            Neo4j-compatible properties dictionary
+        """
+        neo4j_props = {}
+
+        for key, value in properties.items():
+            # Direct storage for simple types
+            if isinstance(value, (str, int, float, bool, type(None))):
+                neo4j_props[key] = value
+
+            # Lists of simple types
+            elif isinstance(value, list):
+                if all(isinstance(v, (str, int, float, bool)) for v in value):
+                    neo4j_props[key] = value
+                else:
+                    # Complex list - convert to JSON string
+                    neo4j_props[key] = json.dumps(value)
+
+            # Dictionaries - convert to JSON string
+            elif isinstance(value, dict):
+                neo4j_props[key] = json.dumps(value)
+
+            # Other objects - convert to string
+            else:
+                neo4j_props[key] = str(value)
+
+        return neo4j_props
+
+    def _write_isa_relationships(self, session, isa_edges: List[Edge], batch_size: int) -> int:
+        """
+        Write isA (taxonomy) relationships to Neo4j with special handling.
+
+        For isA relationships (Entity -> ConceptType):
+        1. Create the isA relationship edge
+        2. Get the target ConceptType label and add it to the source entity
+
+        Args:
+            session: Neo4j session
+            isa_edges: List of isA relationship edges
+            batch_size: Batch size
+
+        Returns:
+            Number of edges written
+        """
+        edges_written = 0
+
+        for i in range(0, len(isa_edges), batch_size):
+            batch = isa_edges[i:i + batch_size]
+
+            for edge in batch:
+                # Prepare edge properties
+                edge_props = {
+                    "confidence": edge.confidence if edge.confidence is not None else 0.95,
+                    "relationship_category": "taxonomy"
+                }
+
+                if edge.source_chunks:
+                    edge_props["source_chunks"] = edge.source_chunks
+
+                # Add any additional properties
+                if edge.properties:
+                    for key, value in edge.properties.items():
+                        if isinstance(value, (str, int, float, bool)):
+                            edge_props[key] = value
+
+                # Create isA relationship
+                # Also get the target (ConceptType) label to add to source entity
+                cypher = """
+                MATCH (source:Entity {id: $source_id})
+                MATCH (target {id: $target_id})
+                MERGE (source)-[r:isA]->(target)
+                SET r += $properties
+                WITH source, target
+                SET source += {taxonomy_label: target.label}
+                RETURN source, target
+                """
+
+                try:
+                    session.run(cypher,
+                               source_id=edge.source_id,
+                               target_id=edge.target_id,
+                               properties=edge_props)
+                    edges_written += 1
+                except Exception as e:
+                    logger.warning(f"Error writing isA relationship {edge.source_id} -> {edge.target_id}: {e}")
+                    continue
+
+        return edges_written
+
+    def _write_belongto_relationships(self, session, belongto_edges: List[Edge], batch_size: int) -> int:
+        """
+        Write belongTo (concept hierarchy) relationships to Neo4j with special handling.
+
+        For belongTo relationships (ConceptType -> ConceptType):
+        1. Create the belongTo relationship edge
+        2. Store hierarchyLevel as edge property
+
+        Example: Industry:Software -[belongTo {hierarchyLevel: 1}]-> Industry:Technology
+
+        Args:
+            session: Neo4j session
+            belongto_edges: List of belongTo relationship edges
+            batch_size: Batch size
+
+        Returns:
+            Number of edges written
+        """
+        edges_written = 0
+
+        for i in range(0, len(belongto_edges), batch_size):
+            batch = belongto_edges[i:i + batch_size]
+
+            for edge in batch:
+                # Prepare edge properties
+                edge_props = {
+                    "confidence": edge.confidence if edge.confidence is not None else 0.9,
+                    "relationship_category": "concept_hierarchy"
+                }
+
+                if edge.source_chunks:
+                    edge_props["source_chunks"] = edge.source_chunks
+
+                # Add hierarchyLevel from SPG edge properties
+                if edge.properties and "hierarchyLevel" in edge.properties:
+                    edge_props["hierarchyLevel"] = edge.properties["hierarchyLevel"]
+
+                # Add any additional properties
+                if edge.properties:
+                    for key, value in edge.properties.items():
+                        if key != "hierarchyLevel" and isinstance(value, (str, int, float, bool)):
+                            edge_props[key] = value
+
+                # Create belongTo relationship between ConceptTypes
+                cypher = """
+                MATCH (source {id: $source_id})
+                MATCH (target {id: $target_id})
+                MERGE (source)-[r:belongTo]->(target)
+                SET r += $properties
+                RETURN source, target
+                """
+
+                try:
+                    session.run(cypher,
+                               source_id=edge.source_id,
+                               target_id=edge.target_id,
+                               properties=edge_props)
+                    edges_written += 1
+                except Exception as e:
+                    logger.warning(f"Error writing belongTo relationship {edge.source_id} -> {edge.target_id}: {e}")
+                    continue
+
+        return edges_written
+
     def __del__(self):
         """Close Neo4j driver on cleanup."""
         if hasattr(self, 'driver'):

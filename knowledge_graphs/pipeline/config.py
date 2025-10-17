@@ -9,7 +9,7 @@ import os
 import logging
 from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -22,8 +22,7 @@ class ComponentConfig(BaseModel):
     enabled: bool = Field(True, description="Whether component is enabled")
     config: Dict[str, Any] = Field(default_factory=dict, description="Component-specific configuration")
     
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class PipelineConfig(BaseModel):
@@ -45,18 +44,20 @@ class PipelineConfig(BaseModel):
     # Global configuration that can be inherited by components
     global_config: Dict[str, Any] = Field(default_factory=dict, description="Global configuration values")
     
-    @validator('components')
+    @field_validator('components')
+    @classmethod
     def validate_components(cls, v):
         """Validate that required components are present."""
         required_components = ['scanner', 'reader', 'extractor', 'writer']
-        
+
         for required in required_components:
             if required not in v:
                 logger.warning(f"Required component '{required}' not found in configuration")
-        
+
         return v
     
-    @validator('max_workers')
+    @field_validator('max_workers')
+    @classmethod
     def validate_max_workers(cls, v):
         """Validate max workers is positive."""
         if v <= 0:

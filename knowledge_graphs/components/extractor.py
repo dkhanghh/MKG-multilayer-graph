@@ -8,8 +8,12 @@ This module contains extractor implementations that extract structured knowledge
 import json
 import logging
 import uuid
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Any, Optional, Set, Tuple, Union
 import re
+
+# Set logger level for this module to DEBUG temporarily
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 from .base import Extractor
 from ..models.chunk import Chunk
@@ -18,8 +22,6 @@ from ..models.pipeline_state import PipelineState
 from ..utils.registry import register_component
 from ..utils.llm_client import LLMClient, create_llm_client, LLMMessage, extract_json_from_response, create_extraction_prompt
 from ..utils.template_loader import load_prompt_template, get_template_loader
-
-logger = logging.getLogger(__name__)
 
 
 @register_component(
@@ -43,6 +45,10 @@ logger = logging.getLogger(__name__)
             "api_key": {
                 "type": "string",
                 "description": "API key for the LLM provider"
+            },
+            "base_url": {
+                "type": "string",
+                "description": "Optional base URL for OpenAI-compatible API endpoints"
             },
             "temperature": {
                 "type": "number",
@@ -105,18 +111,31 @@ class LLMExtractor(Extractor):
         llm_provider = self.get_config_value("llm_provider", "openai")
         model = self.get_config_value("model", "gpt-3.5-turbo")
         api_key = self.get_config_value("api_key")
+        base_url = self.get_config_value("base_url")
         temperature = self.get_config_value("temperature", 0.1)
         max_tokens = self.get_config_value("max_tokens", 2000)
-        
+
         # Create LLM client
         try:
-            self.llm_client = create_llm_client(
-                provider=llm_provider,
-                model=model,
-                api_key=api_key,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
+            client_kwargs = {
+                "provider": llm_provider,
+                "model": model,
+                "api_key": api_key,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+
+            # Add base_url if provided
+            if base_url:
+                client_kwargs["base_url"] = base_url
+                # Add default headers to help bypass Cloudflare protection
+                client_kwargs["default_headers"] = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                    "Accept-Language": "en-US,en;q=0.9"
+                }
+
+            self.llm_client = create_llm_client(**client_kwargs)
         except Exception as e:
             logger.error(f"Failed to initialize LLM client: {e}")
             raise
@@ -173,24 +192,35 @@ class LLMExtractor(Extractor):
     def _process_chunk_batch(self, chunks: List[Chunk]) -> List[SubGraph]:
         """
         Process a batch of chunks.
-        
+
         Args:
             chunks: List of chunks to process
-            
+
         Returns:
             List of extracted subgraphs
         """
         subgraphs = []
-        
+
         for chunk in chunks:
             try:
+                # Skip empty or whitespace-only chunks
+                if not chunk.content or not chunk.content.strip():
+                    logger.debug(f"Skipping empty chunk {chunk.id}")
+                    continue
+
+                # Skip chunks that are too short to contain meaningful information
+                min_chunk_length = self.get_config_value("min_chunk_length", 10)
+                if len(chunk.content.strip()) < min_chunk_length:
+                    logger.debug(f"Skipping chunk {chunk.id} - too short ({len(chunk.content)} chars)")
+                    continue
+
                 subgraph = self._extract_from_chunk(chunk)
                 if not subgraph.is_empty():
                     subgraphs.append(subgraph)
             except Exception as e:
                 logger.error(f"Error extracting from chunk {chunk.id}: {e}")
                 continue
-        
+
         return subgraphs
     
     def _extract_from_chunk(self, chunk: Chunk) -> SubGraph:
@@ -204,12 +234,19 @@ class LLMExtractor(Extractor):
             SubGraph with extracted knowledge
         """
         text = chunk.content
+        prompt = None
+
+        # Debug logging for chunk content
+        logger.debug(f"Processing chunk {chunk.id}")
+        logger.debug(f"Chunk content length: {len(text)} characters")
+        logger.debug(f"Chunk content preview: {text[:200]}..." if len(text) > 200 else f"Chunk content: {text}")
 
         # Create extraction prompt - use template if configured
         use_template = self.get_config_value("use_template", False)
+        logger.debug(f"Use template: {use_template}")
 
         if use_template:
-            prompt = self._create_template_prompt(text)
+            ner = self._create_template_prompt("ner.md", text, None)
         else:
             # Use traditional prompt creation
             prompt = create_extraction_prompt(
@@ -220,30 +257,102 @@ class LLMExtractor(Extractor):
         
         # Call LLM
         try:
-            response = self.llm_client.simple_chat(prompt)
-            extraction_result = extract_json_from_response(response)
-            
-            if not extraction_result:
-                logger.warning(f"No valid JSON found in LLM response for chunk {chunk.id}")
-                return SubGraph(source_chunk_id=chunk.id)
-            
-            # Convert to SubGraph
-            subgraph = self._create_subgraph_from_extraction(chunk, extraction_result)
-            return subgraph
+            if prompt:
+                response = self.llm_client.simple_chat(prompt)
+                extraction_result = extract_json_from_response(response)
+
+                if not extraction_result:
+                    logger.warning(f"No valid JSON found in LLM response for chunk {chunk.id}")
+                    return SubGraph(source_chunk_id=chunk.id)
+
+                subgraph = self._create_subgraph_from_extraction(chunk, extraction_result, extraction_result)
+                return subgraph
+            else:
+                # Step 1: Extract NER (Named Entity Recognition)
+                logger.debug(f"Starting NER extraction for chunk {chunk.id}")
+                response_ner = self.llm_client.simple_chat(ner)
+                extraction_ner = extract_json_from_response(response_ner)
+
+                # Validate NER results before proceeding
+                if not extraction_ner or not self._has_valid_entities(extraction_ner):
+                    logger.warning(f"No valid entities found in NER step for chunk {chunk.id}")
+                    return SubGraph(source_chunk_id=chunk.id)
+
+                # Count entities (handle both array and dict formats)
+                entity_count = len(extraction_ner) if isinstance(extraction_ner, list) else len(extraction_ner.get('entities', []))
+                logger.debug(f"NER extraction successful for chunk {chunk.id}, found {entity_count} entities")
+
+                # Normalize extraction_ner to dict format for STD/TRP templates
+                # Templates expect: {"entities": [...]}
+                if isinstance(extraction_ner, list):
+                    normalized_ner = {"entities": extraction_ner}
+                else:
+                    normalized_ner = extraction_ner
+
+                # Step 2: Extract STD (standardize entities with official names)
+                logger.debug(f"Starting STD extraction for chunk {chunk.id}")
+
+                # Create prompt for STD
+                # STD expects: {"entities": [...]}
+                std = self._create_template_prompt("std.md", text, normalized_ner)
+
+                # Execute STD extraction
+                response_std = self.llm_client.simple_chat(std)
+
+                # Process STD results
+                extraction_std = extract_json_from_response(response_std)
+                if not extraction_std or not self._has_valid_entities(extraction_std):
+                    logger.warning(f"STD extraction failed for chunk {chunk.id}, using NER results")
+                    extraction_std = normalized_ner  # Fallback to normalized NER results
+                else:
+                    logger.debug(f"STD extraction completed for chunk {chunk.id}")
+                    # Normalize STD results if they're in array format
+                    if isinstance(extraction_std, list):
+                        extraction_std = {"entities": extraction_std}
+
+                # Step 3: Extract TRP (relationships using STD entities with official names)
+                logger.debug(f"Starting TRP extraction for chunk {chunk.id}")
+
+                # TRP should use STD entities (which have official_name) instead of NER entities
+                # This ensures relationship IDs match the entity_map built from STD results
+                trp = self._create_template_prompt("trp.md", text, extraction_std)
+
+                # Execute TRP extraction
+                response_trp = self.llm_client.simple_chat(trp)
+
+                # Process TRP results
+                extraction_trp = extract_json_from_response(response_trp)
+                if not extraction_trp:
+                    logger.warning(f"Triple extraction failed for chunk {chunk.id}, using empty relationships")
+                    extraction_trp = {"relationships": []}
+                else:
+                    # Normalize TRP results if they're in array format
+                    if isinstance(extraction_trp, list):
+                        extraction_trp = {"relationships": extraction_trp}
+
+                    relationship_count = len(extraction_trp.get('relationships', []))
+                    logger.debug(f"Triple extraction completed for chunk {chunk.id}, found {relationship_count} relationships")
+
+                # Convert to SubGraph using validated results
+                subgraph = self._create_subgraph_from_extraction(chunk, extraction_std, extraction_trp)
+                return subgraph
             
         except Exception as e:
             logger.error(f"Error calling LLM for chunk {chunk.id}: {e}")
             return SubGraph(source_chunk_id=chunk.id)
     
-    def _build_extraction_schema(self, custom_schema: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_extraction_schema(self, custom_schema: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
         """
         Build the extraction schema for the LLM.
-        
+
         Args:
-            custom_schema: Custom schema to merge
-            
+            custom_schema: Custom schema to merge - can be:
+                - String path to .schema file (e.g., "path/to/schema.schema")
+                - Dictionary with custom schema structure
+                - Empty dict for default schema only
+
         Returns:
-            Complete extraction schema
+            Complete extraction schema dictionary
         """
         default_schema = {
             "type": "object",
@@ -280,20 +389,64 @@ class LLMExtractor(Extractor):
             "required": ["entities", "relationships"]
         }
         
-        # Merge with custom schema
+        # Process custom schema
         if custom_schema:
             # Check if it's a domain schema file path
             if isinstance(custom_schema, str) and custom_schema.endswith('.schema'):
-                custom_schema = self._parse_domain_schema_file(custom_schema)
+                parsed_schema = self._parse_domain_schema_file(custom_schema)
+                if parsed_schema and "entities" in parsed_schema:
+                    logger.info("Using domain schema from file - returning complete parsed schema")
+                    return parsed_schema
+                else:
+                    logger.warning("Failed to parse domain schema file, using default schema")
             elif isinstance(custom_schema, str):
                 # Assume it's domain schema content
-                custom_schema = self._parse_domain_schema_content(custom_schema)
+                parsed_schema = self._parse_domain_schema_content(custom_schema)
+                if parsed_schema and "entities" in parsed_schema:
+                    logger.info("Using domain schema content - returning complete parsed schema")
+                    return parsed_schema
+                else:
+                    logger.warning("Failed to parse domain schema content, using default schema")
 
-            # Simple merge - could be more sophisticated
+            # Handle dictionary custom schemas (JSON schema format)
             if isinstance(custom_schema, dict):
-                default_schema.update(custom_schema)
+                # Check if this is a complete JSON schema replacement
+                if self._is_complete_json_schema(custom_schema):
+                    logger.info("Using complete JSON schema - replacing default schema")
+                    return custom_schema
+                else:
+                    # Partial schema - merge with default
+                    logger.info("Merging partial custom schema with default schema")
+                    default_schema.update(custom_schema)
 
         return default_schema
+
+    def _is_complete_json_schema(self, schema: Dict[str, Any]) -> bool:
+        """
+        Check if the provided schema is a complete JSON schema.
+
+        Args:
+            schema: Schema dictionary to check
+
+        Returns:
+            True if this is a complete JSON schema, False if partial
+        """
+        # Check if it's a JSON schema format
+        if (schema.get("type") == "object" and
+            "properties" in schema and
+            "entities" in schema["properties"] and
+            "relationships" in schema["properties"]):
+            return True
+
+        # Check if it's a simplified format with direct entities/relationships
+        if "entities" in schema and "relationships" in schema:
+            return True
+
+        # Check if it contains schema-level configuration that suggests complete replacement
+        if any(key in schema for key in ["type", "required", "properties", "$schema"]):
+            return True
+
+        return False
 
     def _parse_domain_schema_file(self, schema_file_path: str) -> Dict[str, Any]:
         """
@@ -315,57 +468,171 @@ class LLMExtractor(Extractor):
 
     def _parse_domain_schema_content(self, content: str) -> Dict[str, Any]:
         """
-        Parse domain schema content in the custom format.
-
-        Expected format:
-        namespace DomainKG
-
-        EntityType(中文名): EntityType
-             properties:
-                property_name(中文名): Type
-                    index: IndexType
+        Parse domain schema content and return the complete schema structure.
 
         Args:
-            content: Schema content string
+            content: Schema content string from .schema file
 
         Returns:
-            Schema dictionary compatible with the extractor
+            Complete schema structure to be used directly by the LLM
         """
         try:
-            entity_types = []
+            schema = {
+                "namespace": None,
+                "entities": {},
+                "relations": {},
+                "entity_types": [],
+                "relation_types": []
+            }
+
             lines = content.strip().split('\n')
             current_entity = None
+            current_section = None
 
             for line in lines:
+                original_line = line
                 line = line.strip()
-                if not line or line.startswith('namespace'):
+
+                if not line:
                     continue
 
-                # Parse entity type definition
-                if line.endswith(': EntityType'):
-                    # Extract entity name (before parentheses if present)
-                    entity_full = line.replace(': EntityType', '')
-                    if '(' in entity_full:
-                        entity_name = entity_full.split('(')[0]
-                    else:
-                        entity_name = entity_full
+                # Parse namespace
+                if line.startswith('namespace '):
+                    schema["namespace"] = line.replace('namespace ', '').strip()
+                    continue
 
-                    entity_types.append(entity_name)
+                # Parse entity definitions
+                if line.endswith(': EntityType') or line.endswith(': ConceptType'):
+                    entity_name = line.split(':')[0].strip()
+                    entity_type = line.split(':')[1].strip()
+
                     current_entity = entity_name
-                    logger.debug(f"Found entity type: {entity_name}")
+                    schema["entities"][entity_name] = {
+                        "type": entity_type,
+                        "properties": {},
+                        "relations": {}
+                    }
+                    schema["entity_types"].append(entity_name)
+                    current_section = None
+                    continue
 
-            # Update the entity types for the schema
-            if entity_types:
-                self.entity_types = entity_types
-                logger.info(f"Updated entity types from domain schema: {entity_types}")
+                # Parse sections within entities
+                if current_entity and line in ['properties:', 'relations:']:
+                    current_section = line.replace(':', '')
+                    continue
 
-            # Return empty dict as the main schema structure doesn't need to change
-            # The entity types are already updated in self.entity_types
-            return {}
+                # Parse properties and relations
+                if current_entity and current_section and original_line.startswith('\t'):
+                    if current_section == 'properties':
+                        self._parse_property_line(line, schema["entities"][current_entity]["properties"])
+                    elif current_section == 'relations':
+                        relation_info = self._parse_relation_line(line, schema["entities"][current_entity]["relations"])
+                        if relation_info and relation_info["relation_name"] not in schema["relation_types"]:
+                            schema["relation_types"].append(relation_info["relation_name"])
+
+            # Update instance variables
+            self.entity_types = schema["entity_types"]
+            self.relation_types = schema["relation_types"]
+
+            logger.info(f"Parsed domain schema with {len(schema['entities'])} entities and {len(schema['relation_types'])} relation types")
+            logger.debug(f"Entity types: {schema['entity_types']}")
+            logger.debug(f"Relation types: {schema['relation_types']}")
+
+            return schema
 
         except Exception as e:
             logger.error(f"Failed to parse domain schema content: {e}")
             return {}
+
+    def _parse_property_line(self, line: str, properties: Dict[str, Any]) -> None:
+        """Parse a property line from the schema."""
+        try:
+            if ':' in line:
+                parts = line.split(':', 1)
+                prop_name = parts[0].strip()
+                prop_type = parts[1].strip() if len(parts) > 1 else "Text"
+
+                properties[prop_name] = {
+                    "type": prop_type,
+                    "index": None
+                }
+            elif 'index:' in line:
+                # Handle index specification for previous property
+                index_type = line.replace('index:', '').strip()
+                # Find the last property and update its index
+                if properties:
+                    last_prop = list(properties.keys())[-1]
+                    properties[last_prop]["index"] = index_type
+        except Exception as e:
+            logger.debug(f"Error parsing property line '{line}': {e}")
+
+    def _parse_relation_line(self, line: str, relations: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse a relation line from the schema."""
+        try:
+            if ':' in line:
+                parts = line.split(':', 1)
+                relation_name = parts[0].strip()
+                target_entity = parts[1].strip() if len(parts) > 1 else ""
+
+                relations[relation_name] = {
+                    "target_entity": target_entity,
+                    "constraint": None,
+                    "properties": {},
+                    "rule": None
+                }
+
+                return {"relation_name": relation_name, "target_entity": target_entity}
+            elif 'constraint:' in line:
+                # Handle constraint specification
+                constraint = line.replace('constraint:', '').strip()
+                if relations:
+                    last_relation = list(relations.keys())[-1]
+                    relations[last_relation]["constraint"] = constraint
+            elif 'rule:' in line:
+                # Handle rule specification (for complex relations)
+                rule = line.replace('rule:', '').strip()
+                if relations:
+                    last_relation = list(relations.keys())[-1]
+                    relations[last_relation]["rule"] = rule
+        except Exception as e:
+            logger.debug(f"Error parsing relation line '{line}': {e}")
+
+        return None
+
+    def _has_valid_entities(self, extraction_result: Union[Dict[str, Any], List[Dict[str, Any]]]) -> bool:
+        """
+        Check if extraction result contains valid entities.
+
+        Args:
+            extraction_result: Result from LLM extraction (dict with "entities" key OR array of entities)
+
+        Returns:
+            True if result contains valid entities, False otherwise
+        """
+        # Handle array format: [{...}, {...}]
+        if isinstance(extraction_result, list):
+            if len(extraction_result) == 0:
+                return False
+            # Check if at least one entity has required fields
+            for entity in extraction_result:
+                if isinstance(entity, dict) and "name" in entity and entity.get("name", "").strip():
+                    return True
+            return False
+
+        # Handle dict format: {"entities": [{...}, {...}]}
+        if isinstance(extraction_result, dict):
+            entities = extraction_result.get("entities", [])
+            if not isinstance(entities, list) or len(entities) == 0:
+                return False
+
+            # Check if at least one entity has required fields
+            for entity in entities:
+                if isinstance(entity, dict) and "name" in entity and entity.get("name", "").strip():
+                    return True
+            return False
+
+        # Invalid format
+        return False
 
     def _get_extraction_instructions(self) -> str:
         """
@@ -397,7 +664,7 @@ Return only valid JSON matching the schema.
         
         return instructions
 
-    def _create_template_prompt(self, text: str) -> str:
+    def _create_template_prompt(self, template_name: str, text: str, named_entities: Optional[dict]) -> str:
         """
         Create extraction prompt using Jinja2 template.
 
@@ -407,19 +674,26 @@ Return only valid JSON matching the schema.
         Returns:
             Rendered prompt string
         """
-        template_name = self.get_config_value("template_name", "ner.md")
 
         try:
+            # Debug logging
+            logger.debug(f"Creating template prompt: {template_name}")
+            logger.debug(f"Input text length: {len(text)} characters")
+            logger.debug(f"Input text preview: {text[:200]}..." if len(text) > 200 else f"Input text: {text}")
+            logger.debug(f"Named entities: {named_entities}")
+
             # Load and render template
             prompt = load_prompt_template(
                 template_name=template_name,
                 schema=self.extraction_schema,
                 input_text=text,
-                entity_types=self.entity_types,
-                relation_types=self.relation_types
+                named_entities=named_entities,
             )
 
-            logger.debug(f"Created prompt using template: {template_name}")
+            logger.debug(f"Template {template_name} rendered successfully")
+            logger.debug(f"Rendered prompt length: {len(prompt)} characters")
+            logger.debug(f"Rendered prompt preview: {prompt[:500]}..." if len(prompt) > 500 else f"Rendered prompt: {prompt}")
+
             return prompt
 
         except Exception as e:
@@ -427,20 +701,24 @@ Return only valid JSON matching the schema.
             logger.info("Falling back to traditional prompt creation")
 
             # Fallback to traditional prompt
-            return create_extraction_prompt(
+            fallback_prompt = create_extraction_prompt(
                 text=text,
                 schema=self.extraction_schema,
                 instructions=self._get_extraction_instructions()
             )
 
-    def _create_subgraph_from_extraction(self, chunk: Chunk, extraction: Dict[str, Any]) -> SubGraph:
+            logger.debug(f"Fallback prompt length: {len(fallback_prompt)} characters")
+            return fallback_prompt
+
+    def _create_subgraph_from_extraction(self, chunk: Chunk, extraction_std: Optional[Dict[str, Any]], extraction_trp: Optional[Dict[str, Any]]) -> SubGraph:
         """
         Create SubGraph from LLM extraction result.
-        
+
         Args:
             chunk: Source chunk
-            extraction: Extraction result dictionary
-            
+            extraction_std: Standardized entities from STD extraction step (contains "entities" array)
+            extraction_trp: Relationships from Triple extraction step (contains "relationships" array)
+
         Returns:
             SubGraph with nodes and edges
         """
@@ -448,19 +726,23 @@ Return only valid JSON matching the schema.
         
         # Create nodes from entities
         entity_map = {}  # Map entity ID to node
-        
-        entities = extraction.get("entities", [])
+
+        entities = extraction_std.get("entities", [])
         for entity_data in entities:
             try:
                 node = self._create_node_from_entity(chunk, entity_data)
                 subgraph.add_node(node)
-                entity_map[entity_data.get("id", "")] = node
+                entity_id = entity_data.get("id", "")
+                entity_map[entity_id] = node
+                logger.debug(f"Added entity to map: id='{entity_id}', name='{entity_data.get('name')}'")
             except Exception as e:
                 logger.warning(f"Error creating node from entity: {e}")
                 continue
+
+        logger.debug(f"Entity map has {len(entity_map)} entities: {list(entity_map.keys())}")
         
         # Create edges from relationships
-        relationships = extraction.get("relationships", [])
+        relationships = extraction_trp.get("relationships", [])
         for relationship_data in relationships:
             try:
                 edge = self._create_edge_from_relationship(chunk, relationship_data, entity_map)
@@ -484,43 +766,46 @@ Return only valid JSON matching the schema.
     def _create_node_from_entity(self, chunk: Chunk, entity_data: Dict[str, Any]) -> Node:
         """
         Create Node from entity data.
-        
+
         Args:
             chunk: Source chunk
             entity_data: Entity dictionary from LLM
-            
+
         Returns:
             Node object
         """
         entity_id = entity_data.get("id", str(uuid.uuid4()))
         name = entity_data.get("name", "")
-        node_type = entity_data.get("type", "Unknown")
+        label = entity_data.get("category", "Unknown")
+        official_name = entity_data.get("official_name", "")
         description = entity_data.get("description", "")
-        properties = entity_data.get("properties", {})
-        
+        properties = entity_data.get("properties", "")
+
         # Ensure we have required fields
         if not name:
             raise ValueError("Entity name is required")
-        
+
         # Create node
         node = Node(
             id=entity_id,
             name=name,
-            node_type=node_type,
-            properties=properties
+            label=label,
+            official_name=official_name if official_name else name
         )
-        
+
         # Add description as property if provided
         if description:
             node.add_property("description", description)
-        
+
+        # Add properties as properties if provided
+        if properties:
+            node.add_property("properties", properties)
+
         # Add source information
         node.add_source_chunk(chunk.id)
-        if chunk.source_file:
-            node.add_property("source_file", chunk.source_file)
         if chunk.page_number:
             node.add_property("page_number", chunk.page_number)
-        
+
         return node
     
     def _create_edge_from_relationship(
@@ -531,12 +816,17 @@ Return only valid JSON matching the schema.
     ) -> Optional[Edge]:
         """
         Create Edge from relationship data.
-        
+
+        Handles three types of relationships:
+        1. isA (taxonomy): EntityType -> ConceptType
+        2. Schema-defined: Relationships from schema's relations section
+        3. On-the-fly: Discovered relationships not in schema
+
         Args:
             chunk: Source chunk
             relationship_data: Relationship dictionary from LLM
             entity_map: Map of entity IDs to nodes
-            
+
         Returns:
             Edge object or None if invalid
         """
@@ -545,20 +835,20 @@ Return only valid JSON matching the schema.
         relation_type = relationship_data.get("relation_type", "")
         description = relationship_data.get("description", "")
         confidence = relationship_data.get("confidence", 0.8)
-        
+
         # Validate required fields
         if not all([source_id, target_id, relation_type]):
             logger.warning("Missing required relationship fields")
             return None
-        
+
         # Check that both entities exist
         if source_id not in entity_map or target_id not in entity_map:
             logger.warning(f"Relationship references unknown entities: {source_id} -> {target_id}")
             return None
-        
+
         # Create edge
         edge_id = f"{source_id}_{relation_type}_{target_id}"
-        
+
         edge = Edge(
             id=edge_id,
             source_id=source_id,
@@ -566,14 +856,37 @@ Return only valid JSON matching the schema.
             relation_type=relation_type,
             confidence=confidence
         )
-        
+
+        # Extract SPG edge properties from relationship_data
+        edge_properties = relationship_data.get("properties", {})
+        if edge_properties and isinstance(edge_properties, dict):
+            # Add all SPG edge properties (financial data, temporal info, etc.)
+            edge.add_properties(edge_properties)
+            logger.debug(f"Added {len(edge_properties)} SPG edge properties to {relation_type}")
+
+        # Determine relationship category based on relation_type and confidence
+        # Priority 1a: isA relationships (Entity -> ConceptType taxonomy)
+        if relation_type == "isA":
+            edge.add_property("relationship_category", "taxonomy")
+            edge.add_property("is_taxonomy", True)
+        # Priority 1b: belongTo relationships (ConceptType -> ConceptType hierarchy)
+        elif relation_type == "belongTo":
+            edge.add_property("relationship_category", "concept_hierarchy")
+            edge.add_property("is_hierarchy", True)
+        # Priority 2: Schema-defined (inferred from higher confidence and common schema patterns)
+        # Priority 3: On-the-fly (typically lower confidence)
+        elif confidence >= 0.7:
+            edge.add_property("relationship_category", "schema_defined")
+        else:
+            edge.add_property("relationship_category", "discovered")
+
         # Add description as property if provided
         if description:
             edge.add_property("description", description)
-        
+
         # Add source information
         edge.add_source_chunk(chunk.id)
-        
+
         return edge
     
     def _merge_subgraphs(self, subgraphs: List[SubGraph]) -> List[SubGraph]:
@@ -599,8 +912,8 @@ Return only valid JSON matching the schema.
         for subgraph in subgraphs:
             # Merge nodes (simple name-based deduplication)
             for node in subgraph.nodes:
-                node_key = f"{node.node_type}:{node.name.lower()}"
-                
+                node_key = f"{node.label}:{node.name.lower()}"
+
                 if node_key in merged_nodes:
                     # Merge source chunks
                     existing_node = merged_nodes[node_key]
@@ -734,7 +1047,8 @@ class RegexExtractor(Extractor):
                         node = Node(
                             id=entity_id,
                             name=entity_value,
-                            node_type=entity_type.title(),
+                            label=entity_type.title(),
+                            official_name=entity_value,
                             properties={
                                 "pattern": pattern,
                                 "match_start": match.start(),
@@ -864,7 +1178,8 @@ class KeywordExtractor(Extractor):
                         node = Node(
                             id=entity_id,
                             name=keyword,
-                            node_type=entity_type.title(),
+                            label=entity_type.title(),
+                            official_name=keyword,
                             properties={
                                 "keyword": keyword,
                                 "match_start": match.start(),

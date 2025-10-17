@@ -1,0 +1,271 @@
+namespace Finance
+
+# ============================================================================
+# SEMANTIC PROPERTY GRAPH (SPG) SCHEMA
+# Simplified from RDF-style reification to direct property-rich edges
+# ============================================================================
+
+# ============================================================================
+# SOURCE LAYER
+# ============================================================================
+
+Chunk: EntityType
+    properties:
+        content: Text
+            index: TextAndVector
+        chunkIndex: Integer
+        pageNumber: Integer
+
+# ============================================================================
+# CONCEPT TAXONOMIES (Hierarchical - with belongTo relations)
+# ============================================================================
+
+# Note: ConceptTypes can have belongTo relationships to create hierarchies
+# Example: Industry:Software -[belongTo]-> Industry:Technology
+#          TimePeriod:Q4_2023 -[belongTo]-> TimePeriod:2023
+
+Industry: ConceptType
+    hypernymPredicate: isA
+    relations:
+        belongTo: Industry
+            edgeProperties:
+                hierarchyLevel: Integer
+
+ExecutiveRole: ConceptType
+    hypernymPredicate: isA
+    relations:
+        belongTo: ExecutiveRole
+            edgeProperties:
+                hierarchyLevel: Integer
+
+ProductCategory: ConceptType
+    hypernymPredicate: isA
+    relations:
+        belongTo: ProductCategory
+            edgeProperties:
+                hierarchyLevel: Integer
+
+RegionType: ConceptType
+    hypernymPredicate: isA
+    relations:
+        belongTo: RegionType
+            edgeProperties:
+                hierarchyLevel: Integer
+
+EventCategory: ConceptType
+    hypernymPredicate: isA
+    relations:
+        belongTo: EventCategory
+            edgeProperties:
+                hierarchyLevel: Integer
+
+# ============================================================================
+# CORE ENTITIES (Nodes)
+# ============================================================================
+
+Company: EntityType
+    properties:
+        desc: Text
+            index: Text
+        ticker: Text
+            index: Text
+        foundedYear: Integer
+        marketCap: Float
+        employeeCount: Integer
+        industry: Industry
+            constraint: MultiValue
+    relations:
+        # Corporate structure (direct edges)
+        OWNS: Company
+            edgeProperties:
+                ownershipPercent: Float
+                acquiredDate: Text
+                isSubsidiary: Boolean
+        COMPETES_WITH: Company
+            edgeProperties:
+                marketOverlap: Text
+                intensity: Text
+
+        # Financial reporting (collapsed financial entities into edge properties)
+        REPORTED_FINANCIALS: FinancialStatement
+            edgeProperties:
+                period: Text                    # "Q4 2023"
+                periodStart: Text               # "2023-10-01"
+                periodEnd: Text                 # "2023-12-31"
+                revenue: Float
+                revenueCurrency: Text
+                profit: Float
+                profitType: Text                # "net", "gross", "operating"
+                expenses: Float
+                assets: Float
+                liabilities: Float
+                equity: Float
+                cashFlow: Float
+                debtToEquity: Float
+                profitMargin: Float
+                confidence: Float
+                sourceChunks: List[Text]
+
+        # Personnel
+        EMPLOYS: Executive
+            edgeProperties:
+                hireDate: Text
+                salary: Float
+                isCurrentEmployee: Boolean
+
+        # Products & Services
+        PRODUCES: Product
+            edgeProperties:
+                launchDate: Text
+                discontinuedDate: Text
+                marketShare: Float
+
+        # Business operations
+        OPERATES_IN: GeographicRegion
+            edgeProperties:
+                since: Text
+                revenuePercent: Float
+                employeeCount: Integer
+
+        HAS_SEGMENT: BusinessSegment
+            edgeProperties:
+                segmentRevenue: Float
+                segmentProfit: Float
+                segmentGrowthRate: Float
+
+        # Regulatory & Events
+        FILED: RegulatoryFiling
+            edgeProperties:
+                filingDate: Text
+                filingType: Text
+                status: Text
+
+        INVOLVED_IN: FinancialEvent
+            edgeProperties:
+                eventDate: Text
+                role: Text                      # "acquirer", "target", "participant"
+                impact: Text                    # "positive", "negative", "neutral"
+
+        # Market data (collapsed MarketData entity)
+        HAS_MARKET_DATA: MarketData
+            edgeProperties:
+                recordedDate: Text
+                stockPrice: Float
+                volume: Integer
+                marketCap: Float
+                peRatio: Float
+                dividend: Float
+
+Executive: EntityType
+    properties:
+        desc: Text
+            index: Text
+        fullName: Text
+            index: Text
+        position: Text
+            index: Text
+        role: ExecutiveRole
+        startDate: Text
+        endDate: Text
+        age: Integer
+    relations:
+        WORKS_FOR: Company              # Reverse captured in Company.EMPLOYS
+        LEADS: BusinessSegment
+            edgeProperties:
+                since: Text
+                performance: Text
+
+Product: EntityType
+    properties:
+        desc: Text
+            index: Text
+        productName: Text
+            index: Text
+        category: ProductCategory
+        launchDate: Text
+        version: Text
+    relations:
+        PRODUCED_BY: Company            # Reverse of Company.PRODUCES
+        PART_OF: BusinessSegment
+            edgeProperties:
+                contributionPercent: Float
+
+BusinessSegment: EntityType
+    properties:
+        desc: Text
+            index: Text
+        segmentName: Text
+            index: Text
+        segmentType: Text               # "geographic", "product", "business unit"
+    relations:
+        BELONGS_TO: Company
+        INCLUDES: Product
+
+GeographicRegion: EntityType
+    properties:
+        desc: Text
+            index: Text
+        regionName: Text
+            index: Text
+        regionType: RegionType
+        country: Text
+        continent: Text
+        population: Integer
+    relations:
+        CONTAINS: Company               # Reverse of Company.OPERATES_IN
+
+# ============================================================================
+# EVENT & FILING ENTITIES (Lightweight - data in edges)
+# ============================================================================
+
+FinancialStatement: EntityType
+    properties:
+        desc: Text
+            index: Text
+        statementName: Text
+            index: Text
+        statementType: Text             # "Balance Sheet", "Income Statement", "Cash Flow"
+        fiscalYear: Text
+        fiscalPeriod: Text              # "Q1", "Q2", "Q3", "Q4", "FY"
+        reportingDate: Text
+    relations:
+        REPORTED_BY: Company            # Reverse of Company.REPORTED_FINANCIALS
+        PART_OF: RegulatoryFiling
+            edgeProperties:
+                pageNumber: Integer
+                sectionName: Text
+
+FinancialEvent: EntityType
+    properties:
+        desc: Text
+            index: Text
+        eventName: Text
+            index: Text
+        eventDate: Text
+            index: Text
+        category: EventCategory
+        eventType: Text                 # "merger", "acquisition", "ipo", "bankruptcy"
+        severity: Text                  # "high", "medium", "low"
+    relations:
+        INVOLVES: Company               # Inverse of Company.INVOLVED_IN
+        AFFECTS: Company
+            edgeProperties:
+                impactType: Text        # "financial", "operational", "reputational"
+                impactMagnitude: Float
+
+RegulatoryFiling: EntityType
+    properties:
+        desc: Text
+            index: Text
+        filingName: Text
+            index: Text
+        filingType: Text                # "10-K", "10-Q", "8-K", "DEF 14A"
+        filingDate: Text
+        fiscalPeriod: Text
+        documentUrl: Text
+    relations:
+        FILED_BY: Company               # Reverse of Company.FILED
+        COVERS_PERIOD: Text             # Period as property, no separate node
+            edgeProperties:
+                periodStart: Text
+                periodEnd: Text

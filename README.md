@@ -190,3 +190,32 @@ For questions and support:
 
 - GitHub Issues: [Create an issue](https://github.com/your-org/kag-langgraph/issues)
 - Documentation: [Full docs](https://kag-langgraph.readthedocs.io/)
+## Project Structure
+
+```
+thesis-llms-multilayer-graph/
+├── knowledge_graphs/      # Core knowledge graph pipeline
+├── chatbot_graphs/        # RAG chatbot implementation
+├── agents/                # Agent implementations
+├── data/                  # Data files
+│   ├── financebench/      # FinanceBench dataset
+│   └── output/            # Pipeline outputs
+├── scripts/               # Utility scripts
+│   ├── debug/             # Debug scripts
+│   ├── utilities/         # Helper scripts
+│   └── servers/           # Server scripts
+├── tests/                 # Test suite
+│   ├── unit/              # Unit tests
+│   ├── integration/       # Integration tests
+│   ├── e2e/               # End-to-end tests
+│   └── component_tests/   # Component tests
+├── docs/                  # Documentation
+│   ├── guides/            # User guides
+│   ├── api/               # API documentation
+│   └── architecture/      # Architecture docs
+├── configs/               # Configuration files
+├── examples/              # Example code
+└── utils/                 # Global utilities
+```
+
+See [docs/README.md](docs/README.md) for complete documentation.

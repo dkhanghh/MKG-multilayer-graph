@@ -1,7 +1,8 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "kag_pipeline": "./sever.py:graph"
+    "kag_pipeline": "./server.py:graph",
+    "rag_chatbot": "./chatbot_graphs/rag_graph.py:graph"
   },
   "env": ".env"
 }

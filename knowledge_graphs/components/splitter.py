@@ -31,6 +31,13 @@ try:
 except ImportError:
     HAS_SENTENCE_TRANSFORMERS = False
 
+try:
+    from google import genai
+    import os
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+
 
 @register_component(
     "splitter",
@@ -172,7 +179,6 @@ class LengthSplitter(Splitter):
                     id=f"{chunk.id}_split_{i}",
                     content=split_text.strip(),
                     chunk_type=chunk.chunk_type,
-                    source_file=chunk.source_file,
                     page_number=chunk.page_number,
                     chunk_index=i,
                     heading_level=chunk.heading_level,
@@ -512,7 +518,6 @@ class SentenceSplitter(Splitter):
                     id=f"{chunk.id}_sent_{chunk_idx}",
                     content=chunk_text,
                     chunk_type=chunk.chunk_type,
-                    source_file=chunk.source_file,
                     page_number=chunk.page_number,
                     chunk_index=chunk_idx,
                     heading_level=chunk.heading_level,
@@ -587,8 +592,17 @@ class SentenceSplitter(Splitter):
         "properties": {
             "model_name": {
                 "type": "string",
-                "description": "Name of the sentence transformer model",
+                "description": "Name of the embedding model (SentenceTransformer or Gemini)",
                 "default": "all-MiniLM-L6-v2"
+            },
+            "api_key": {
+                "type": "string",
+                "description": "API key for Gemini models (optional, can use GOOGLE_API_KEY env var)"
+            },
+            "batch_size": {
+                "type": "integer",
+                "description": "Batch size for API calls (Gemini only)",
+                "default": 10
             },
             "similarity_threshold": {
                 "type": "number",
@@ -619,20 +633,53 @@ class SemanticSplitter(Splitter):
     def __init__(self, config):
         """Initialize semantic splitter."""
         super().__init__(config)
-        
-        if not HAS_SENTENCE_TRANSFORMERS:
-            raise ImportError(
-                "sentence-transformers not installed. "
-                "Install with: pip install sentence-transformers"
-            )
-        
+
         # Load embedding model
         model_name = self.get_config_value("model_name", "all-MiniLM-L6-v2")
-        try:
-            self.embedding_model = SentenceTransformer(model_name)
-        except Exception as e:
-            logger.error(f"Failed to load embedding model {model_name}: {e}")
-            raise
+        self.model_name = model_name
+        self.is_gemini = model_name.startswith("gemini-embedding")
+
+        if self.is_gemini:
+            if not HAS_GEMINI:
+                raise ImportError(
+                    "google-genai not installed. "
+                    "Install with: pip install google-genai"
+                )
+
+            # Initialize Gemini client
+            api_key = self.get_config_value("api_key") or os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "Google AI API key not provided. Set GOOGLE_API_KEY environment variable "
+                    "or provide 'api_key' in config."
+                )
+
+            try:
+                # Initialize Gemini client with API key
+                # Set the API key in environment if not already set
+                if not os.getenv("GOOGLE_API_KEY"):
+                    os.environ["GOOGLE_API_KEY"] = api_key
+
+                self.gemini_client = genai.Client()
+                logger.info(f"Initialized Gemini embeddings with model: {model_name}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Gemini client: {e}")
+                raise
+
+        else:
+            # Use SentenceTransformer
+            if not HAS_SENTENCE_TRANSFORMERS:
+                raise ImportError(
+                    "sentence-transformers not installed. "
+                    "Install with: pip install sentence-transformers"
+                )
+
+            try:
+                self.embedding_model = SentenceTransformer(model_name)
+                logger.info(f"Initialized SentenceTransformer with model: {model_name}")
+            except Exception as e:
+                logger.error(f"Failed to load SentenceTransformer model {model_name}: {e}")
+                raise
     
     def process(self, state: PipelineState) -> PipelineState:
         """
@@ -714,7 +761,7 @@ class SemanticSplitter(Splitter):
             return [chunk]
         
         # Compute sentence embeddings
-        embeddings = self.embedding_model.encode(sentences)
+        embeddings = self._generate_embeddings(sentences)
         
         # Find split points based on similarity
         split_points = self._find_semantic_splits(
@@ -810,7 +857,6 @@ class SemanticSplitter(Splitter):
                 id=f"{original_chunk.id}_semantic_{i}",
                 content=chunk_text,
                 chunk_type=original_chunk.chunk_type,
-                source_file=original_chunk.source_file,
                 page_number=original_chunk.page_number,
                 chunk_index=i,
                 heading_level=original_chunk.heading_level,
@@ -826,7 +872,60 @@ class SemanticSplitter(Splitter):
             split_chunks.append(split_chunk)
         
         return split_chunks if split_chunks else [original_chunk]
-    
+
+    def _generate_embeddings(self, sentences: List[str]):
+        """
+        Generate embeddings for sentences using either Gemini or SentenceTransformer.
+
+        Args:
+            sentences: List of sentences to embed
+
+        Returns:
+            List of embeddings (numpy arrays or lists)
+        """
+        if self.is_gemini:
+            return self._generate_gemini_embeddings(sentences)
+        else:
+            return self.embedding_model.encode(sentences)
+
+    def _generate_gemini_embeddings(self, sentences: List[str]):
+        """
+        Generate embeddings using Gemini API.
+
+        Args:
+            sentences: List of sentences to embed
+
+        Returns:
+            List of embeddings
+        """
+        import numpy as np
+
+        embeddings = []
+        batch_size = self.get_config_value("batch_size", 10)  # Process in batches
+
+        try:
+            for i in range(0, len(sentences), batch_size):
+                batch = sentences[i:i + batch_size]
+
+                # Gemini API expects list of contents
+                result = self.gemini_client.models.embed_content(
+                    model=self.model_name,
+                    contents=batch
+                )
+
+                # Extract embedding values
+                for embedding in result.embeddings:
+                    embeddings.append(np.array(embedding.values))
+
+            logger.debug(f"Generated {len(embeddings)} embeddings using Gemini")
+            return embeddings
+
+        except Exception as e:
+            logger.error(f"Error generating Gemini embeddings: {e}")
+            # Fallback to zero embeddings
+            embedding_dim = 768  # Default dimension
+            return [np.zeros(embedding_dim) for _ in sentences]
+
     def _simple_sentence_split(self, text: str) -> List[str]:
         """Simple sentence splitting fallback."""
         sentences = re.split(r'[.!?]+\s+', text)

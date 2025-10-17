@@ -7,7 +7,7 @@ KAG-LangGraph pipeline, enabling stateful workflow execution.
 
 from typing import Dict, Any, List, Optional, Union
 from typing_extensions import TypedDict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
 import json
 from datetime import datetime
@@ -37,8 +37,7 @@ class ComponentOutput(BaseModel):
     execution_time: Optional[float] = Field(None, description="Time taken to execute component (seconds)")
     timestamp: Optional[datetime] = Field(None, description="When the component was executed")
     
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class PipelineMetrics(BaseModel):

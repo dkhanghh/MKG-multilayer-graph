@@ -1,98 +1,135 @@
-namespace DomainKG
+namespace TestInstruction
 
-Chunk(文本块): EntityType
-     properties:
-        content(内容): Text
-          index: TextAndVector
+TaxOfTestType: ConceptType
+	hypernymPredicate: isA
 
-ArtificialObject(人造物体): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+TaxOfEquipmentType: ConceptType
+	hypernymPredicate: isA
 
-Astronomy(天文学): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+Equipment: EntityType
+	properties:
+		equipmentId: Text
+			index: Text
+		desc: Text
+			index: Text
+		semanticType: Text
+			index: Text
+		IND#belongTo: TaxOfEquipmentType
+	relations:
+		usedBy: TestInstruction
+			constraint: MultiValue
 
-Building(建筑): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+Others: EntityType
+	properties:
+		desc: Text
+			index: TextAndVector
+		semanticType: Text
+			index: Text
 
-Creature(生物): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+InstructionStep: EntityType
+	properties:
+		semanticType: Text
+			index: Text
+		stepOrder: Integer
+		desc: Text
+			index: Text
+		duration: Integer
+	relations:
+		dependsOn: InstructionStep
+			constraint: MultiValue
+		uses: Equipment
+			constraint: MultiValue
 
-Concept(概念): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+Condition: EntityType
+	properties:
+		conditionId: Text
+			index: Text
+		desc: Text
+			index: Text
+		semanticType: Text
+			index: Text
+		priority: Integer
+	relations:
+		appliesTo: TestInstruction
+			constraint: MultiValue
 
-Date(日期): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+TestInstruction: EntityType
+	properties:
+		instructionId: Text
+			index: Text
+		desc: Text
+			index: Text
+		semanticType: Text
+			index: Text
+		complexity: Integer
+		IND#belongTo: TaxOfTestType
+	relations:
+		hasCondition: Condition
+			constraint: MultiValue
+		hasPurpose: Purpose
+			constraint: MultiValue
+		hasStep: InstructionStep
+			constraint: MultiValue
+		requiresEquipment: Equipment
+			constraint: MultiValue
+		followedBy: TestInstruction
+			properties:
+				sequenceOrder: Integer
+		validates: TestInstruction
+			rule: [[
+				Define (s:TestInstruction)-[p:validates]->(o:TestInstruction) {
+					STRUCTURE {
+						(s)-[:hasStep]->(step:InstructionStep),
+						(step)-[:uses]->(eq:Equipment)<-[:requiresEquipment]-(o)
+					}
+					CONSTRAINT {
+						stepCount = group(s,o).count(step)
+						R1("Validation requires multiple steps"): stepCount > 1
+					}
+				}
+			]]
 
-GeographicLocation(地理位置): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+Chunk: EntityType
+	properties:
+		chunkId: Text
+			index: Text
+		content: Text
+			index: TextAndVector
+		sourceFile: Text
+			index: Text
+	relations:
+		relatesTo: TestInstruction
+			constraint: MultiValue
 
-Keyword(关键词): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+TestType: ConceptType
+	hypernymPredicate: isA
 
-Medicine(药物): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+Purpose: EntityType
+	properties:
+		purposeId: Text
+			index: Text
+		semanticType: Text
+			index: Text
+		desc: Text
+			index: Text
+		importance: Integer
+	relations:
+		achievedBy: TestInstruction
+			constraint: MultiValue
 
+TestCategory: ConceptType
+	hypernymPredicate: isA
 
-NaturalScience(自然科学): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
+Laboratory: EntityType
+	properties:
+		labId: Text
+			index: Text
+		name: Text
+			index: Text
+		certification: Text
+	relations:
+		hasEquipment: Equipment
+			constraint: MultiValue
+		conducts: TestInstruction
+			constraint: MultiValue
 
-Organization(组织机构): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
-
-Person(人物): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text
-            
-Others(其他): EntityType
-     properties:
-        desc(描述): Text
-            index: TextAndVector
-        semanticType(语义类型): Text
-            index: Text

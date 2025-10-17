@@ -129,7 +129,6 @@ class TXTReader(Reader):
                         id=f"{Path(file_path).stem}_chunk_{i // lines_per_chunk}",
                         content=chunk_content,
                         chunk_type=ChunkType.TEXT,
-                        source_file=file_path,
                         chunk_index=i // lines_per_chunk,
                     )
                     chunks.append(chunk)
@@ -140,7 +139,6 @@ class TXTReader(Reader):
                     id=f"{Path(file_path).stem}_full",
                     content=content.strip(),
                     chunk_type=ChunkType.TEXT,
-                    source_file=file_path,
                     chunk_index=0,
                 )
                 chunks.append(chunk)
@@ -258,7 +256,6 @@ class PDFReader(Reader):
                             id=f"{Path(file_path).stem}_page_{page_num + 1}",
                             content=page_text.strip(),
                             chunk_type=ChunkType.TEXT,
-                            source_file=file_path,
                             page_number=page_num + 1,
                             chunk_index=page_num,
                         )
@@ -277,7 +274,6 @@ class PDFReader(Reader):
                 id=f"{Path(file_path).stem}_full",
                 content=full_text.strip(),
                 chunk_type=ChunkType.TEXT,
-                source_file=file_path,
                 chunk_index=0,
             )
             chunks.append(chunk)
@@ -418,7 +414,6 @@ class DOCXReader(Reader):
                 id=f"{Path(file_path).stem}_full",
                 content=content,
                 chunk_type=ChunkType.TEXT,
-                source_file=file_path,
                 chunk_index=0,
                 processing_metadata={"paragraph_count": len(paragraphs)}
             )
@@ -645,7 +640,6 @@ class MixedReader(Reader):
                         id=f"{Path(file_path).stem}_text",
                         content=content.strip(),
                         chunk_type=ChunkType.TEXT,
-                        source_file=file_path,
                         chunk_index=0,
                     )
                     chunks.append(chunk)

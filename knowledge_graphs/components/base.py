@@ -7,7 +7,7 @@ that all pipeline components inherit from.
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type, TypeVar, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from ..models.pipeline_state import PipelineState, ComponentOutput
 
@@ -22,8 +22,7 @@ class ComponentConfig(BaseModel):
     enabled: bool = Field(True, description="Whether component is enabled")
     config: Dict[str, Any] = Field(default_factory=dict, description="Component-specific configuration")
     
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class BaseComponent(ABC):

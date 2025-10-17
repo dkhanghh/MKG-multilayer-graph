@@ -57,6 +57,7 @@ except ImportError:
 try:
     from knowledge_graphs.pipeline.langgraph_executor import LangGraphExecutor, PipelineWorkflow
     from knowledge_graphs.models.pipeline_state import PipelineStateManager
+    from knowledge_graphs.pipeline.batch_processor import BatchPipelineProcessor, process_directory_in_batches
     HAS_KAG_LANGGRAPH = True
 except ImportError as e:
     logger.warning(f"KAG-LangGraph components not available: {e}")
@@ -106,15 +107,17 @@ DEFAULT_CONFIG = {
                 "enabled": True
             },
             "reader": {
-                "type": "pdf_reader",
+                "type": "txt_reader",
                 "enabled": True
             },
             "splitter": {
                 "type": "semantic_splitter",
                 "enabled": True,
                 "config": {
-                    "chunk_size": 1000,
-                    "chunk_overlap": 100
+                    "model_name": "jhu-clsp/mmBERT-small",
+                    "similarity_threshold": 0.95,
+                    "min_chunk_length": 100,
+                    "max_chunk_length": 500
                 }
             },
             "extractor": {
@@ -122,16 +125,25 @@ DEFAULT_CONFIG = {
                 "enabled": True,
                 "config": {
                     "llm_provider": "openai",
-                    "model": "gpt-3.5-turbo",
-                    "temperature": 0.1,
-                    "max_tokens": 2000,
-                    "entity_types": ["Person", "Organization", "Location", "Concept"],
-                    "relation_types": ["works_for", "located_in", "related_to", "part_of"],
+                    "model": "gpt-5-mini",
+                    "temperature": 1,
+                    "max_tokens": 4096,
+                    "use_template": True,
+                    "extraction_schema": "knowledge_graphs/schema/financebench_spg.schema",
                     "batch_size": 5
                 }
             },
             "vectorizer": {
-                "type": "embedding_vectorizer",
+                "type": "gemini_vectorizer",        # "type": "openai_vectorizer",
+                "model": "gemini-embedding-001",    # "model": "text-embedding-embeddinggemma-300m",
+                                                    # "api_key": "lm-studio",
+                                                    # "base_url": "https://llm.duykhangh.net/v1",
+                "max_tokens": 4096,
+                "embed_nodes": True,
+                "embed_edges": True,
+                "batch_size": 100,                  # Paid Tier 1 optimal batch size
+                "max_retries": 3,                   # Retry up to 3 times on rate limit
+                "retry_delay": 10,                  # Initial delay: 10s (then 20s, 40s with exponential backoff)
                 "enabled": True
             },
             "writer": {
@@ -140,7 +152,9 @@ DEFAULT_CONFIG = {
                 "config": {
                     "uri": "bolt://localhost:7687",
                     "username": "neo4j",
-                    "password": "neo4j@openspg"
+                    "password": "neo4j@openspg",
+                    "database": "financebench1",
+                    "clear_database": True
                 }
             }
         }
@@ -153,6 +167,7 @@ class PipelineRequest(BaseModel):
     input_path: str = Field(..., description="Path to input file or directory")
     config: Optional[Dict[str, Any]] = Field(None, description="Custom pipeline configuration")
     output_path: Optional[str] = Field(None, description="Custom output path")
+    batch_size: Optional[int] = Field(10, description="Number of files to process per batch (for directory processing)")
 
 class PipelineResponse(BaseModel):
     """Response model for pipeline execution."""
@@ -333,6 +348,78 @@ if HAS_FASTAPI:
 
         except Exception as e:
             logger.error(f"Pipeline execution failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/pipeline/run-batch", response_model=PipelineResponse)
+    @traceable(name="pipeline_run_batch")
+    async def run_pipeline_batch(request: PipelineRequest):
+        """
+        Run the pipeline on a directory processing files in batches.
+
+        This endpoint processes files in batches to avoid memory issues
+        when dealing with large numbers of files.
+
+        Args:
+            request: Pipeline execution request with batch_size parameter
+
+        Returns:
+            Aggregated pipeline execution results from all batches
+        """
+        try:
+            # Add tracing metadata
+            if HAS_LANGSMITH:
+                try:
+                    from langsmith import get_current_run_tree
+                    run_tree = get_current_run_tree()
+                    if run_tree:
+                        run_tree.add_metadata({
+                            "execution_mode": "batch",
+                            "batch_size": request.batch_size,
+                            "server_version": "1.0.0",
+                            "input_path": request.input_path,
+                            "output_path": request.output_path,
+                            "has_custom_config": request.config is not None
+                        })
+                except Exception as e:
+                    logger.debug(f"Failed to add tracing metadata: {e}")
+
+            # Use custom config if provided, otherwise use default
+            config = request.config if request.config else DEFAULT_CONFIG.copy()
+
+            # Update output path if provided
+            if request.output_path:
+                config["pipeline"]["components"]["writer"]["config"]["output_path"] = request.output_path
+
+            # Use batch processor
+            logger.info(f"Starting batch processing with batch_size={request.batch_size}")
+            results = process_directory_in_batches(
+                request.input_path,
+                config,
+                batch_size=request.batch_size
+            )
+
+            # Convert to response model
+            metrics = results.get("metrics")
+            if metrics and hasattr(metrics, 'dict'):
+                metrics = metrics.dict()
+            elif metrics and not isinstance(metrics, dict):
+                metrics = dict(metrics) if hasattr(metrics, '__dict__') else {}
+
+            response = PipelineResponse(
+                pipeline_id=results["pipeline_id"],
+                status=results["status"],
+                input_path=results["input_path"],
+                output_path=results.get("output_path"),
+                metrics=metrics,
+                errors=results.get("errors", []),
+                execution_summary=results.get("execution_summary"),
+                timestamp=datetime.utcnow().isoformat()
+            )
+
+            return response
+
+        except Exception as e:
+            logger.error(f"Batch pipeline execution failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/pipeline/run-async", response_model=PipelineResponse)
@@ -585,7 +672,7 @@ def main():
 
     # Start the server
     uvicorn.run(
-        "sever:app",  # Module and app variable
+        "server:app",  # Module and app variable
         host=host,
         port=port,
         reload=reload,
