@@ -145,9 +145,9 @@ main() {
     
     # Start the server
     if [ "$RELOAD" = "true" ]; then
-        uv run uvicorn sever:app --host "$HOST" --port "$PORT" --reload --log-level "$LOG_LEVEL"
+        uv run uvicorn run_server:app --host "$HOST" --port "$PORT" --reload --log-level "$LOG_LEVEL"
     else
-        uv run python sever.py
+        uv run python run_server.py
     fi
 }
 

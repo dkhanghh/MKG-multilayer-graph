@@ -8,6 +8,7 @@ to build knowledge graphs.
 from .base import BaseComponent, ComponentConfig
 from .scanner import Scanner, FileScanner, DirectoryScanner
 from .reader import Reader, PDFReader, TXTReader, DOCXReader
+from .financebench_reader import FinanceBenchReader
 from .splitter import Splitter, LengthSplitter, SemanticSplitter
 from .extractor import Extractor, LLMExtractor
 from .vectorizer import Vectorizer, EmbeddingVectorizer
@@ -26,8 +27,9 @@ __all__ = [
     # Reader components
     "Reader",
     "PDFReader",
-    "TXTReader", 
+    "TXTReader",
     "DOCXReader",
+    "FinanceBenchReader",
     
     # Splitter components
     "Splitter",

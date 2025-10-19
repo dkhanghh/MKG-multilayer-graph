@@ -1,0 +1,1147 @@
+"""
+Neo4j retriever for knowledge graph querying.
+"""
+import os
+
+# Optional Neo4j import
+try:
+    from neo4j import GraphDatabase
+    HAS_NEO4J = True
+except ImportError:
+    HAS_NEO4J = False
+
+# Optional embedding support
+try:
+    from sentence_transformers import SentenceTransformer
+    HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    HAS_SENTENCE_TRANSFORMERS = False
+
+# Optional Ollama for embeddings
+try:
+    import ollama
+    HAS_OLLAMA = True
+except ImportError:
+    HAS_OLLAMA = False
+
+# Optional Gemini for embeddings
+try:
+    from google import genai
+    from google.genai import types
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+
+
+class Neo4jRetriever:
+    """Handles Neo4j database connections and queries."""
+
+    def __init__(self):
+        """Initialize Neo4j connection."""
+        if not HAS_NEO4J:
+            raise ImportError("neo4j not installed")
+
+        # Get Neo4j credentials from environment
+        self.uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        self.username = os.getenv("NEO4J_USERNAME", "neo4j")
+        self.password = os.getenv("NEO4J_PASSWORD")
+        self.database = os.getenv("NEO4J_DATABASE", "financebench")
+
+        if not self.password:
+            raise ValueError("NEO4J_PASSWORD environment variable is required")
+
+        # Create driver
+        self.driver = GraphDatabase.driver(
+            self.uri,
+            auth=(self.username, self.password)
+        )
+
+        # Initialize embedding model for vector search
+        # IMPORTANT: Model must generate vectors matching Neo4j vector dimensions
+        self.embedding_model = None
+        self.embedding_type = None
+
+        # Check for embedding model configuration
+        model_name = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
+        embedding_provider = os.getenv("EMBEDDING_PROVIDER", "gemini")  # gemini, ollama, sentence-transformers
+
+        # Try Gemini first (for embedding-001 and other Gemini models)
+        if embedding_provider == "gemini" and HAS_GEMINI:
+            try:
+                # Configure Gemini API
+                api_key = os.getenv("GOOGLE_API_KEY")
+                if not api_key:
+                    raise ValueError("GOOGLE_API_KEY environment variable is required for Gemini embeddings")
+
+                # Initialize Gemini client (using google-genai package)
+                self.gemini_client = genai.Client(api_key=api_key)
+                self.embedding_model = model_name
+                self.embedding_type = "gemini"
+
+                # Test embedding
+                test_result = self.gemini_client.models.embed_content(
+                    model=self.embedding_model,
+                    contents=["test"],
+                    config=types.EmbedContentConfig(
+                        task_type="RETRIEVAL_DOCUMENT"
+                    )
+                )
+                test_vec = test_result.embeddings[0].values
+                print(f"[Neo4j Retriever] Using Gemini embedding model: {self.embedding_model}")
+                print(f"[Neo4j Retriever] Embedding dimension: {len(test_vec)}")
+            except Exception as e:
+                print(f"Warning: Could not use Gemini embedding model: {e}")
+                self.embedding_model = None
+                self.gemini_client = None
+
+        # Try Ollama (for nomic-embed-text and other Ollama models)
+        if self.embedding_model is None and embedding_provider == "ollama" and HAS_OLLAMA:
+            try:
+                # For Ollama models, just store the model name
+                # The actual model name without @quantization suffix
+                self.embedding_model = model_name.split('@')[0] if '@' in model_name else model_name
+                self.embedding_type = "ollama"
+
+                # Test embedding
+                test_vec = ollama.embeddings(model=self.embedding_model, prompt="test")['embedding']
+                print(f"[Neo4j Retriever] Using Ollama embedding model: {self.embedding_model}")
+                print(f"[Neo4j Retriever] Embedding dimension: {len(test_vec)}")
+            except Exception as e:
+                print(f"Warning: Could not use Ollama embedding model: {e}")
+                self.embedding_model = None
+
+        # Fall back to sentence-transformers
+        if self.embedding_model is None and HAS_SENTENCE_TRANSFORMERS:
+            try:
+                model_name = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-mpnet-base-v2")
+                print(f"[Neo4j Retriever] Loading sentence-transformer model: {model_name}")
+                self.embedding_model = SentenceTransformer(model_name)
+                self.embedding_type = "sentence_transformer"
+                test_vec = self.embedding_model.encode("test")
+                print(f"[Neo4j Retriever] Embedding dimension: {len(test_vec)}")
+            except Exception as e:
+                print(f"Warning: Could not load embedding model: {e}")
+                self.embedding_model = None
+
+    def generate_embedding(self, text: str) -> list:
+        """Generate embedding for text using the configured model."""
+        if not self.embedding_model:
+            raise ValueError("No embedding model available")
+
+        if self.embedding_type == "gemini":
+            # Use google-genai package API
+            result = self.gemini_client.models.embed_content(
+                model=self.embedding_model,
+                contents=[text],
+                config=types.EmbedContentConfig(
+                    task_type="RETRIEVAL_QUERY"  # Use RETRIEVAL_QUERY for query embeddings
+                )
+            )
+            return result.embeddings[0].values
+        elif self.embedding_type == "ollama":
+            result = ollama.embeddings(model=self.embedding_model, prompt=text)
+            return result['embedding']
+        elif self.embedding_type == "sentence_transformer":
+            return self.embedding_model.encode(text).tolist()
+        else:
+            raise ValueError(f"Unknown embedding type: {self.embedding_type}")
+
+    def search_knowledge_graph(self, query: str, limit: int = 5) -> str:
+        """
+        Search the knowledge graph for relevant information.
+
+        Args:
+            query: Search query text
+            limit: Maximum number of results to return
+
+        Returns:
+            Formatted context string with retrieved information
+        """
+        try:
+            with self.driver.session(database=self.database) as session:
+                # Search for nodes matching the query text
+                # Only search properties that exist in the schema
+                cypher_query = """
+                MATCH (n)
+                WHERE toLower(n.name) CONTAINS toLower($search_text)
+                   OR (n.description IS NOT NULL AND toLower(n.description) CONTAINS toLower($search_text))
+                OPTIONAL MATCH (n)-[r]-(related)
+                WITH n, collect({
+                    relation: type(r),
+                    node: related.name,
+                    direction: CASE WHEN startNode(r) = n THEN 'outgoing' ELSE 'incoming' END
+                }) as relationships
+                RETURN n.name as name,
+                       n.label as type,
+                       n.description as description,
+                       relationships
+                LIMIT $limit
+                """
+
+                result = session.run(cypher_query, search_text=query, limit=limit)
+                records = list(result)
+
+                if not records:
+                    return f"No information found in knowledge graph for: {query}"
+
+                # Format the results into readable context
+                context_parts = []
+                for record in records:
+                    name = record["name"]
+                    node_type = record["type"]
+                    description = record["description"]
+                    relationships = record["relationships"]
+
+                    # Build entity description
+                    entity_desc = f"\n**{name}** ({node_type})"
+
+                    # Add description
+                    if description:
+                        entity_desc += f"\n  - Description: {description}"
+
+                    # Add relationships
+                    if relationships:
+                        entity_desc += "\n  - Related to:"
+                        for rel in relationships[:5]:  # Limit relationships shown
+                            if rel['node']:
+                                direction = "->" if rel['direction'] == 'outgoing' else "<-"
+                                entity_desc += f"\n    - {direction} {rel['relation']}: {rel['node']}"
+
+                    context_parts.append(entity_desc)
+
+                return "\n".join(context_parts)
+
+        except Exception as e:
+            return f"Error querying knowledge graph: {str(e)}"
+
+    def vector_similarity_search(self, query: str, limit: int = 5, similarity_threshold: float = 0.5) -> str:
+        """
+        Search the knowledge graph using vector similarity on embeddings.
+
+        Args:
+            query: Search query text
+            limit: Maximum number of results to return
+            similarity_threshold: Minimum cosine similarity threshold (0-1)
+
+        Returns:
+            Formatted context string with retrieved information
+        """
+        if not self.embedding_model:
+            return "Vector search not available: embedding model not loaded"
+
+        try:
+            # Generate embedding for the query
+            query_embedding = self.generate_embedding(query)
+
+            with self.driver.session(database=self.database) as session:
+                # Vector similarity search using manual cosine similarity calculation
+                # Formula: cosine_similarity = dot_product(A, B) / (magnitude(A) * magnitude(B))
+                cypher_query = """
+                MATCH (n)
+                WHERE n.embeddings IS NOT NULL
+                WITH n,
+                     reduce(dot = 0.0, i IN range(0, size(n.embeddings)-1) |
+                          dot + n.embeddings[i] * $query_vector[i]) /
+                          (sqrt(reduce(sum = 0.0, x IN n.embeddings | sum + x * x)) *
+                           sqrt(reduce(sum = 0.0, x IN $query_vector | sum + x * x))) AS max_similarity
+                WHERE max_similarity >= $threshold
+
+                // Get source chunks linked to the entity
+                OPTIONAL MATCH (chunk:Chunk)-[:SOURCE]->(n)
+                WHERE chunk IS NOT NULL
+                WITH n, max_similarity,
+                     collect(DISTINCT {
+                         id: chunk.id,
+                         content: chunk.content,
+                         chunk_index: chunk.chunk_index,
+                         page_number: chunk.page_number
+                     }) as source_chunks
+
+                // Get relationships
+                OPTIONAL MATCH (n)-[r]-(related)
+                WHERE related IS NOT NULL
+                WITH n, max_similarity, source_chunks,
+                     collect(DISTINCT {
+                         relation: type(r),
+                         node: related.name,
+                         direction: CASE WHEN startNode(r) = n THEN 'outgoing' ELSE 'incoming' END
+                     }) as relationships
+
+                RETURN n.name as name,
+                       n.label as type,
+                       n.id as id,
+                       n.description as description,
+                       max_similarity as similarity,
+                       source_chunks,
+                       relationships
+                ORDER BY max_similarity DESC
+                LIMIT $limit
+                """
+
+                result = session.run(
+                    cypher_query,
+                    query_vector=query_embedding,
+                    threshold=similarity_threshold,
+                    limit=limit
+                )
+                records = list(result)
+
+                if not records:
+                    return f"No similar entities found in knowledge graph for: {query} (threshold: {similarity_threshold})"
+
+                # Format the results into readable context
+                context_parts = []
+                for record in records:
+                    name = record["name"]
+                    entity_type = record["type"]
+                    entity_id = record["id"]
+                    description = record["description"]
+                    similarity = record["similarity"]
+                    source_chunks = record["source_chunks"]
+                    relationships = record["relationships"]
+
+                    # Build entity description
+                    entity_desc = f"\n**{name}** ({entity_type}) [similarity: {similarity:.3f}]"
+                    if entity_id and entity_id != name:
+                        entity_desc += f"\n  - ID: {entity_id}"
+                    if description:
+                        entity_desc += f"\n  - Description: {description}"
+
+                    # Add source chunks prominently if available
+                    if source_chunks and any(c.get('id') for c in source_chunks):
+                        entity_desc += "\n  - Source Chunks (Text Evidence):"
+                        for chunk in source_chunks[:3]:  # Limit to 3 chunks
+                            if chunk.get('content'):
+                                chunk_idx = chunk.get('chunk_index', '?')
+                                page_num = chunk.get('page_number', '?')
+                                entity_desc += f"\n    [Chunk {chunk_idx}, Page {page_num}]: \"{chunk['content']}\""
+
+                    # Add relationships
+                    if relationships:
+                        entity_desc += "\n  - Related to:"
+                        for rel in relationships[:5]:  # Limit relationships shown
+                            if rel['node']:
+                                direction = "->" if rel['direction'] == 'outgoing' else "<-"
+                                entity_desc += f"\n    - {direction} {rel['relation']}: {rel['node']}"
+
+                    context_parts.append(entity_desc)
+
+                return "\n".join(context_parts)
+
+        except Exception as e:
+            return f"Error performing vector similarity search: {str(e)}"
+
+    def entity_graph_search(self, entity_name: str, depth: int = 2) -> str:
+        """
+        Search the knowledge graph starting from a specific entity using vector similarity.
+
+        Uses embeddings for semantic matching, then traverses relationships.
+
+        Args:
+            entity_name: Name of the entity to start from
+            depth: Number of relationship hops to traverse (1 or 2)
+
+        Returns:
+            Formatted context with entity and its neighborhood
+        """
+        if not self.embedding_model:
+            return f"Entity search not available: embedding model not loaded for '{entity_name}'"
+
+        try:
+            # Generate embedding for the entity name
+            query_embedding = self.generate_embedding(entity_name)
+
+            with self.driver.session(database=self.database) as session:
+                # Query to find entity using vector similarity and traverse relationships
+                cypher_query = """
+                MATCH (e)
+                WHERE e.embeddings IS NOT NULL
+                WITH e,
+                     reduce(dot = 0.0, i IN range(0, size(e.embeddings)-1) |
+                          dot + e.embeddings[i] * $query_vector[i]) /
+                          (sqrt(reduce(sum = 0.0, x IN e.embeddings | sum + x * x)) *
+                           sqrt(reduce(sum = 0.0, x IN $query_vector | sum + x * x))) AS max_similarity
+                WHERE max_similarity >= 0.5
+                ORDER BY max_similarity DESC
+                LIMIT 1
+
+                // Get level 1 relationships and their source chunks
+                OPTIONAL MATCH (e)-[r1]-(related1)
+                WHERE related1 IS NOT NULL
+                WITH e, max_similarity,
+                     collect(DISTINCT {
+                         relation: type(r1),
+                         target: related1.name,
+                         target_id: related1.id,
+                         target_type: related1.node_type,
+                         target_label: related1.label,
+                         direction: CASE WHEN startNode(r1) = e THEN 'outgoing' ELSE 'incoming' END,
+                         properties: properties(r1)
+                     }) as level1_rels,
+                     collect(DISTINCT related1) as level1_entities
+
+                // Get source chunks for level 1 entities
+                UNWIND CASE WHEN size(level1_entities) > 0 THEN level1_entities ELSE [null] END as l1_entity
+                OPTIONAL MATCH (chunk1:Chunk)-[:SOURCE]->(l1_entity)
+                WHERE l1_entity IS NOT NULL AND chunk1 IS NOT NULL
+                WITH e, max_similarity, level1_rels, level1_entities,
+                     collect(DISTINCT {
+                         entity_name: l1_entity.name,
+                         entity_id: l1_entity.id,
+                         chunk_id: chunk1.id,
+                         content: chunk1.content,
+                         chunk_index: chunk1.chunk_index,
+                         page_number: chunk1.page_number
+                     }) as level1_chunks
+
+                // Get level 2 relationships if depth >= 2
+                OPTIONAL MATCH (e)-[r1]-(via)-[r2]-(related2)
+                WHERE $depth >= 2 AND via <> e AND related2 <> e AND related2 IS NOT NULL
+                WITH e, max_similarity, level1_rels, level1_chunks,
+                     collect(DISTINCT {
+                         relation: type(r2),
+                         target: related2.name,
+                         target_id: related2.id,
+                         target_type: related2.node_type,
+                         target_label: related2.label,
+                         via: via.name,
+                         properties: properties(r2)
+                     })[..10] as level2_rels,
+                     collect(DISTINCT related2) as level2_entities
+
+                // Get source chunks for level 2 entities
+                UNWIND CASE WHEN size(level2_entities) > 0 THEN level2_entities ELSE [null] END as l2_entity
+                OPTIONAL MATCH (chunk2:Chunk)-[:SOURCE]->(l2_entity)
+                WHERE l2_entity IS NOT NULL AND chunk2 IS NOT NULL
+                WITH e, max_similarity, level1_rels, level1_chunks, level2_rels,
+                     collect(DISTINCT {
+                         entity_name: l2_entity.name,
+                         entity_id: l2_entity.id,
+                         chunk_id: chunk2.id,
+                         content: chunk2.content,
+                         chunk_index: chunk2.chunk_index,
+                         page_number: chunk2.page_number
+                     }) as level2_chunks
+
+                // Get source chunks linked to the main entity
+                OPTIONAL MATCH (chunk:Chunk)-[:SOURCE]->(e)
+                WHERE chunk IS NOT NULL
+                WITH e, max_similarity, level1_rels, level1_chunks, level2_rels, level2_chunks,
+                     collect(DISTINCT {
+                         id: chunk.id,
+                         content: chunk.content,
+                         chunk_index: chunk.chunk_index,
+                         page_number: chunk.page_number
+                     }) as source_chunks
+
+                RETURN e.name as name,
+                       e.label as type,
+                       e.id as id,
+                       e.description as description,
+                       max_similarity as similarity,
+                       level1_rels,
+                       level2_rels,
+                       source_chunks,
+                       level1_chunks,
+                       level2_chunks
+                """
+
+                result = session.run(
+                    cypher_query,
+                    query_vector=query_embedding,
+                    depth=depth
+                )
+
+                record = result.single()
+
+                if not record:
+                    return f"Entity '{entity_name}' not found in knowledge graph (searched with similarity threshold 0.5)"
+
+                # Format the entity and its neighborhood
+                name = record["name"]
+                entity_type = record["type"]
+                entity_id = record["id"]
+                description = record["description"]
+                similarity = record["similarity"]
+                level1_rels = record["level1_rels"]
+                level2_rels = record["level2_rels"] if depth >= 2 else []
+                source_chunks = record["source_chunks"]
+                level1_chunks = record["level1_chunks"]
+                level2_chunks = record["level2_chunks"] if depth >= 2 else []
+
+                context = f"\n## Entity: {name} [similarity: {similarity:.3f}]"
+                if entity_type:
+                    context += f" ({entity_type})"
+                if entity_id and entity_id != name:
+                    context += f"\n- ID: {entity_id}"
+                if description:
+                    context += f"\n- Description: {description}"
+
+                # Note if this is a fuzzy match
+                if similarity < 0.9:
+                    context += f"\n- Note: Found via semantic similarity (query: '{entity_name}')"
+
+                # Add source chunks for main entity
+                if source_chunks and any(c.get('id') for c in source_chunks):
+                    context += "\n\n### Source Chunks (Main Entity):"
+                    for chunk in source_chunks[:5]:  # Limit to 5 chunks
+                        if chunk.get('id'):
+                            context += f"\n  - Chunk ID: {chunk['id']}"
+                            if chunk.get('chunk_index') is not None:
+                                context += f" (index: {chunk['chunk_index']})"
+                            if chunk.get('page_number') is not None:
+                                context += f", Page: {chunk['page_number']}"
+                            if chunk.get('content'):
+                                context += f"\n    Content: {chunk['content']}"
+
+                # Add level 1 relationships
+                if level1_rels and any(r['relation'] for r in level1_rels):
+                    context += "\n\n### Direct Connections (Level 1):"
+                    for rel in level1_rels[:10]:  # Limit to 10
+                        if rel['relation'] and rel['target']:
+                            direction = "→" if rel['direction'] == 'outgoing' else "←"
+                            target_str = rel['target']
+
+                            # Add target entity type if available
+                            target_type = rel.get('target_type') or rel.get('target_label')
+                            if target_type:
+                                target_str = f"{rel['target']} [{target_type}]"
+
+                            context += f"\n  - {direction} {rel['relation']}: {target_str}"
+
+                            # Add relationship properties if they exist
+                            if rel.get('properties'):
+                                props = rel['properties']
+                                if props and isinstance(props, dict) and len(props) > 0:
+                                    context += "\n    Properties:"
+                                    for key, value in list(props.items())[:5]:  # Limit to 5 properties
+                                        context += f"\n      • {key}: {value}"
+
+                # Add source chunks for level 1 entities
+                if level1_chunks:
+                    # Group chunks by entity
+                    chunks_by_entity = {}
+                    for chunk in level1_chunks:
+                        if chunk.get('chunk_id'):  # Only include chunks that exist
+                            entity_name = chunk.get('entity_name', 'Unknown')
+                            if entity_name not in chunks_by_entity:
+                                chunks_by_entity[entity_name] = []
+                            chunks_by_entity[entity_name].append(chunk)
+
+                    if chunks_by_entity:
+                        context += "\n\n### Source Chunks from Level 1 Entities:"
+                        for entity_name, chunks in list(chunks_by_entity.items())[:5]:  # Limit to 5 entities
+                            context += f"\n  **From: {entity_name}**"
+                            for chunk in chunks[:3]:  # Limit to 3 chunks per entity
+                                context += f"\n    - Chunk ID: {chunk['chunk_id']}"
+                                if chunk.get('chunk_index') is not None:
+                                    context += f" (index: {chunk['chunk_index']})"
+                                if chunk.get('page_number') is not None:
+                                    context += f", Page: {chunk['page_number']}"
+                                if chunk.get('content'):
+                                    context += f"\n      {chunk['content']}"
+
+                # Add level 2 relationships if depth is 2
+                if depth >= 2 and level2_rels and any(r['relation'] for r in level2_rels):
+                    context += "\n\n### Indirect Connections (Level 2):"
+                    for rel in level2_rels[:10]:  # Limit to 10
+                        if rel['relation'] and rel['target'] and rel['via']:
+                            target_str = rel['target']
+
+                            # Add target entity type if available
+                            target_type = rel.get('target_type') or rel.get('target_label')
+                            if target_type:
+                                target_str = f"{rel['target']} [{target_type}]"
+
+                            context += f"\n  - via {rel['via']} → {rel['relation']}: {target_str}"
+
+                            # Add relationship properties if they exist
+                            if rel.get('properties'):
+                                props = rel['properties']
+                                if props and isinstance(props, dict) and len(props) > 0:
+                                    context += "\n    Properties:"
+                                    for key, value in list(props.items())[:5]:  # Limit to 5 properties
+                                        context += f"\n      • {key}: {value}"
+
+                # Add source chunks for level 2 entities
+                if depth >= 2 and level2_chunks:
+                    # Group chunks by entity
+                    chunks_by_entity_l2 = {}
+                    for chunk in level2_chunks:
+                        if chunk.get('chunk_id'):  # Only include chunks that exist
+                            entity_name = chunk.get('entity_name', 'Unknown')
+                            if entity_name not in chunks_by_entity_l2:
+                                chunks_by_entity_l2[entity_name] = []
+                            chunks_by_entity_l2[entity_name].append(chunk)
+
+                    if chunks_by_entity_l2:
+                        context += "\n\n### Source Chunks from Level 2 Entities:"
+                        for entity_name, chunks in list(chunks_by_entity_l2.items())[:3]:  # Limit to 3 entities
+                            context += f"\n  **From: {entity_name}**"
+                            for chunk in chunks[:2]:  # Limit to 2 chunks per entity
+                                context += f"\n    - Chunk ID: {chunk['chunk_id']}"
+                                if chunk.get('chunk_index') is not None:
+                                    context += f" (index: {chunk['chunk_index']})"
+                                if chunk.get('page_number') is not None:
+                                    context += f", Page: {chunk['page_number']}"
+                                if chunk.get('content'):
+                                    context += f"\n      {chunk['content']}"
+
+                return context
+
+        except Exception as e:
+            return f"Error performing entity graph search: {str(e)}"
+
+    def _reciprocal_rank_fusion(self, result_lists: list[list[dict]], k: int = 60) -> list[dict]:
+        """
+        Fuse multiple ranked result lists using Reciprocal Rank Fusion (RRF).
+
+        RRF is a simple yet effective algorithm for combining results from multiple
+        retrieval strategies. Each result's score is calculated as:
+        RRF score = sum(1 / (k + rank)) across all result lists
+
+        Args:
+            result_lists: List of ranked result lists, each containing dicts with 'id' and other fields
+            k: RRF constant (typically 60), controls score decay
+
+        Returns:
+            Fused and re-ranked list of results
+        """
+        scores = {}
+
+        for result_list in result_lists:
+            for rank, result in enumerate(result_list, start=1):
+                entity_id = result.get('id') or result.get('name')  # Use id or name as key
+                score = 1.0 / (k + rank)
+
+                if entity_id not in scores:
+                    scores[entity_id] = {
+                        'result': result,
+                        'rrf_score': 0.0,
+                        'sources': []  # Track which strategies found this result
+                    }
+                scores[entity_id]['rrf_score'] += score
+                scores[entity_id]['sources'].append(result.get('source', 'unknown'))
+
+        # Sort by RRF score
+        sorted_results = sorted(
+            scores.values(),
+            key=lambda x: x['rrf_score'],
+            reverse=True
+        )
+
+        # Return results with RRF scores
+        return [
+            {**item['result'], 'rrf_score': item['rrf_score'], 'fusion_sources': item['sources']}
+            for item in sorted_results
+        ]
+
+    def _vector_search_scored(self, query: str, limit: int = 10, threshold: float = 0.4) -> list[dict]:
+        """
+        Vector similarity search on Entity nodes with source chunk retrieval.
+
+        Searches Entity nodes using embeddings, then retrieves the source Chunks
+        that contain actual text mentioning these entities.
+
+        Args:
+            query: Search query
+            limit: Maximum results
+            threshold: Minimum similarity threshold
+
+        Returns:
+            List of dicts with entity information, scores, and source chunks
+        """
+        if not self.embedding_model:
+            return []
+
+        try:
+            query_embedding = self.generate_embedding(query)
+
+            with self.driver.session(database=self.database) as session:
+                # Search Entity nodes with embeddings and retrieve source chunks
+                cypher_query = """
+                MATCH (e:Entity)
+                WHERE e.embeddings IS NOT NULL
+                WITH e,
+                     reduce(dot = 0.0, i IN range(0, size(e.embeddings)-1) |
+                          dot + e.embeddings[i] * $query_vector[i]) /
+                          (sqrt(reduce(sum = 0.0, x IN e.embeddings | sum + x * x)) *
+                           sqrt(reduce(sum = 0.0, x IN $query_vector | sum + x * x))) AS similarity
+                WHERE similarity >= $threshold
+
+                // Get source chunks that mention this entity
+                OPTIONAL MATCH (chunk:Chunk)-[:SOURCE]->(e)
+                WITH e, similarity,
+                     collect(DISTINCT {
+                         id: chunk.id,
+                         content: chunk.content,
+                         chunk_index: chunk.chunk_index,
+                         page_number: chunk.page_number,
+                         word_count: chunk.word_count
+                     }) as source_chunks
+
+                // Get relationships to other entities
+                OPTIONAL MATCH (e)-[r]-(related:Entity)
+                WITH e, similarity, source_chunks,
+                     collect(DISTINCT {
+                         relation: type(r),
+                         node: related.name,
+                         official_name: related.official_name,
+                         direction: CASE WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END
+                     }) as relationships
+
+                RETURN e.name as name,
+                       e.label as type,
+                       e.node_type as node_type,
+                       e.id as id,
+                       e.official_name as official_name,
+                       e.description as description,
+                       similarity as score,
+                       source_chunks,
+                       relationships
+                ORDER BY similarity DESC
+                LIMIT $limit
+                """
+
+                result = session.run(
+                    cypher_query,
+                    query_vector=query_embedding,
+                    threshold=threshold,
+                    limit=limit
+                )
+
+                return [
+                    {
+                        'id': record['id'] or record['name'],
+                        'name': record['name'],
+                        'type': record['node_type'] or record['type'],
+                        'official_name': record['official_name'],
+                        'description': record['description'],
+                        'score': record['score'],
+                        'source_chunks': record['source_chunks'],
+                        'relationships': record['relationships'],
+                        'source': 'vector'
+                    }
+                    for record in result
+                ]
+        except Exception as e:
+            print(f"[Hybrid Search] Vector search error: {e}")
+            return []
+
+    def _chunk_text_search_scored(self, query: str, limit: int = 10) -> list[dict]:
+        """
+        Text-based search directly on Chunk content.
+
+        Searches Chunk nodes for keyword matches in their text content.
+        This provides lexical matching on the actual document text.
+
+        Args:
+            query: Search query
+            limit: Maximum results
+
+        Returns:
+            List of dicts with chunk information and linked entities
+        """
+        try:
+            with self.driver.session(database=self.database) as session:
+                # Search Chunk content for keywords
+                cypher_query = """
+                MATCH (c:Chunk)
+                WHERE c.content IS NOT NULL AND toLower(c.content) CONTAINS toLower($search_text)
+
+                // Get entities linked to this chunk
+                OPTIONAL MATCH (c)-[:SOURCE]->(e:Entity)
+                WITH c,
+                     CASE
+                         WHEN toLower(c.content) = toLower($search_text) THEN 1.0
+                         WHEN toLower(c.content) CONTAINS toLower($search_text) THEN 0.7
+                         ELSE 0.4
+                     END as score,
+                     collect(DISTINCT {
+                         name: e.name,
+                         official_name: e.official_name,
+                         type: e.node_type,
+                         id: e.id
+                     }) as linked_entities
+
+                RETURN c.id as id,
+                       c.content as content,
+                       c.chunk_index as chunk_index,
+                       c.page_number as page_number,
+                       c.word_count as word_count,
+                       score,
+                       linked_entities
+                ORDER BY score DESC, c.chunk_index ASC
+                LIMIT $limit
+                """
+
+                result = session.run(cypher_query, search_text=query, limit=limit)
+
+                return [
+                    {
+                        'id': record['id'],
+                        'name': f"Chunk {record['chunk_index']}: {record['content'][:60]}..." if record['content'] else f"Chunk {record['chunk_index']}",
+                        'type': 'Chunk',
+                        'content': record['content'],
+                        'chunk_index': record['chunk_index'],
+                        'page_number': record['page_number'],
+                        'word_count': record['word_count'],
+                        'score': record['score'],
+                        'linked_entities': record['linked_entities'],
+                        'is_chunk': True,
+                        'source': 'chunk_text'
+                    }
+                    for record in result
+                ]
+        except Exception as e:
+            print(f"[Hybrid Search] Chunk text search error: {e}")
+            return []
+
+    def _text_search_scored(self, query: str, limit: int = 10) -> list[dict]:
+        """
+        Text-based keyword search returning scored results for fusion.
+
+        Args:
+            query: Search query
+            limit: Maximum results
+
+        Returns:
+            List of dicts with entity information and scores
+        """
+        try:
+            with self.driver.session(database=self.database) as session:
+                # Only search properties that exist in the schema
+                cypher_query = """
+                MATCH (n)
+                WHERE toLower(n.name) CONTAINS toLower($search_text)
+                   OR (n.description IS NOT NULL AND toLower(n.description) CONTAINS toLower($search_text))
+                OPTIONAL MATCH (n)-[r]-(related)
+                WITH n,
+                     CASE
+                         WHEN toLower(n.name) = toLower($search_text) THEN 1.0
+                         WHEN toLower(n.name) CONTAINS toLower($search_text) THEN 0.8
+                         WHEN n.description IS NOT NULL AND toLower(n.description) CONTAINS toLower($search_text) THEN 0.6
+                         ELSE 0.4
+                     END as score,
+                     collect({
+                         relation: type(r),
+                         node: related.name,
+                         direction: CASE WHEN startNode(r) = n THEN 'outgoing' ELSE 'incoming' END
+                     }) as relationships
+                RETURN n.name as name,
+                       n.label as type,
+                       n.id as id,
+                       n.description as description,
+                       score,
+                       relationships
+                ORDER BY score DESC
+                LIMIT $limit
+                """
+
+                result = session.run(cypher_query, search_text=query, limit=limit)
+
+                return [
+                    {
+                        'id': record['id'] or record['name'],
+                        'name': record['name'],
+                        'type': record['type'],
+                        'description': record['description'],
+                        'score': record['score'],
+                        'relationships': record['relationships'],
+                        'source': 'text'
+                    }
+                    for record in result
+                ]
+        except Exception as e:
+            print(f"[Hybrid Search] Text search error: {e}")
+            return []
+
+    def _entity_search_scored(self, query: str, limit: int = 5) -> list[dict]:
+        """
+        Entity-based graph search with neighborhood and source chunk retrieval.
+
+        Uses vector similarity to find entities, then explores their graph neighborhood
+        and retrieves source chunks containing actual text.
+
+        Args:
+            query: Search query (entity name or description)
+            limit: Maximum entities to find
+
+        Returns:
+            List of dicts with entity information, relationships, and source chunks
+        """
+        if not self.embedding_model:
+            return []
+
+        try:
+            query_embedding = self.generate_embedding(query)
+
+            with self.driver.session(database=self.database) as session:
+                cypher_query = """
+                MATCH (e:Entity)
+                WHERE e.embeddings IS NOT NULL
+                WITH e,
+                     reduce(dot = 0.0, i IN range(0, size(e.embeddings)-1) |
+                          dot + e.embeddings[i] * $query_vector[i]) /
+                          (sqrt(reduce(sum = 0.0, x IN e.embeddings | sum + x * x)) *
+                           sqrt(reduce(sum = 0.0, x IN $query_vector | sum + x * x))) AS similarity
+                WHERE similarity >= 0.5
+                ORDER BY similarity DESC
+                LIMIT $limit
+
+                // Get source chunks that mention this entity
+                OPTIONAL MATCH (chunk:Chunk)-[:SOURCE]->(e)
+                WITH e, similarity,
+                     collect(DISTINCT {
+                         id: chunk.id,
+                         content: chunk.content,
+                         chunk_index: chunk.chunk_index,
+                         page_number: chunk.page_number,
+                         word_count: chunk.word_count
+                     })[..5] as source_chunks
+
+                // Get relationships to other entities
+                OPTIONAL MATCH (e)-[r]-(related:Entity)
+                WITH e, similarity, source_chunks,
+                     collect(DISTINCT {
+                         relation: type(r),
+                         node: related.name,
+                         official_name: related.official_name,
+                         direction: CASE WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END
+                     }) as relationships
+
+                RETURN e.name as name,
+                       e.label as type,
+                       e.node_type as node_type,
+                       e.id as id,
+                       e.official_name as official_name,
+                       e.description as description,
+                       similarity as score,
+                       source_chunks,
+                       relationships
+                """
+
+                result = session.run(
+                    cypher_query,
+                    query_vector=query_embedding,
+                    limit=limit
+                )
+
+                return [
+                    {
+                        'id': record['id'] or record['name'],
+                        'name': record['name'],
+                        'type': record['node_type'] or record['type'],
+                        'official_name': record['official_name'],
+                        'description': record['description'],
+                        'score': record['score'],
+                        'source_chunks': record['source_chunks'],
+                        'relationships': record['relationships'],
+                        'source': 'entity_graph'
+                    }
+                    for record in result
+                ]
+        except Exception as e:
+            print(f"[Hybrid Search] Entity search error: {e}")
+            return []
+
+    def _format_hybrid_results(self, fused_results: list[dict]) -> str:
+        """
+        Format fused results into readable context string.
+
+        Args:
+            fused_results: List of fused results with RRF scores
+
+        Returns:
+            Formatted context string
+        """
+        if not fused_results:
+            return "No results found"
+
+        context_parts = []
+
+        for idx, result in enumerate(fused_results, 1):
+            name = result.get('name', 'Unknown')
+            entity_type = result.get('type', 'Unknown')
+            entity_id = result.get('id')
+            description = result.get('description')
+            rrf_score = result.get('rrf_score', 0.0)
+            original_score = result.get('score', 0.0)
+            fusion_sources = result.get('fusion_sources', [])
+            is_chunk = result.get('is_chunk', False)
+
+            # Check if this is a Chunk result (direct text search)
+            if is_chunk:
+                # Format Chunk result with actual text content
+                content = result.get('content', '')
+                chunk_index = result.get('chunk_index', '?')
+                page_number = result.get('page_number', '?')
+                word_count = result.get('word_count', 0)
+                linked_entities = result.get('linked_entities', [])
+
+                entity_desc = f"\n**{idx}. Chunk {chunk_index}** (Page {page_number})"
+                entity_desc += f"\n  - RRF Score: {rrf_score:.4f} | Original Score: {original_score:.3f}"
+                entity_desc += f"\n  - Found by: {', '.join(set(fusion_sources))}"
+                entity_desc += f"\n  - Word Count: {word_count}"
+
+                # Show actual content
+                if content:
+                    entity_desc += f"\n  - Content:\n    \"{content}\""
+
+                # Show linked entities
+                if linked_entities:
+                    entity_desc += "\n  - Mentions Entities:"
+                    for entity in linked_entities[:5]:
+                        if entity.get('name'):
+                            official = entity.get('official_name')
+                            entity_name = f"{entity['name']} ({official})" if official and official != entity['name'] else entity['name']
+                            entity_desc += f"\n    • {entity_name} [{entity.get('type', 'Entity')}]"
+            else:
+                # Format Entity result
+                official_name = result.get('official_name')
+                relationships = result.get('relationships', [])
+                source_chunks = result.get('source_chunks', [])
+
+                entity_desc = f"\n**{idx}. {name}** ({entity_type})"
+                entity_desc += f"\n  - RRF Score: {rrf_score:.4f} | Original Score: {original_score:.3f}"
+                entity_desc += f"\n  - Found by: {', '.join(set(fusion_sources))}"
+
+                if official_name and official_name != name:
+                    entity_desc += f"\n  - Official Name: {official_name}"
+                if entity_id and entity_id != name:
+                    entity_desc += f"\n  - ID: {entity_id}"
+                if description:
+                    entity_desc += f"\n  - Description: {description}"
+
+                # Add source chunks prominently if available
+                if source_chunks and any(c.get('id') for c in source_chunks):
+                    entity_desc += "\n  - Source Chunks (Text Evidence):"
+                    for chunk in source_chunks[:3]:  # Limit to 3 chunks
+                        if chunk.get('content'):
+                            chunk_idx = chunk.get('chunk_index', '?')
+                            page_num = chunk.get('page_number', '?')
+                            entity_desc += f"\n    [Chunk {chunk_idx}, Page {page_num}]: \"{chunk['content']}\""
+
+                # Add relationships
+                if relationships:
+                    entity_desc += "\n  - Related Entities:"
+                    # Show up to 5 most important relationships
+                    for rel in relationships[:5]:
+                        if rel.get('node'):
+                            direction = "→" if rel.get('direction') == 'outgoing' else "←"
+                            rel_node = rel['node']
+                            official = rel.get('official_name')
+                            if official and official != rel_node:
+                                rel_node = f"{rel_node} ({official})"
+                            entity_desc += f"\n    • {direction} {rel.get('relation', 'UNKNOWN')}: {rel_node}"
+
+            context_parts.append(entity_desc)
+
+        return "\n".join(context_parts)
+
+    def hybrid_search(self, query: str, limit: int = 5, enable_vector: bool = True,
+                     enable_text: bool = True, enable_entity: bool = True,
+                     enable_chunk: bool = True) -> str:
+        """
+        Hybrid search combining multiple retrieval strategies with Reciprocal Rank Fusion.
+
+        This method combines FOUR powerful retrieval strategies:
+        1. **Vector similarity search on Entities** - Semantic matching using entity embeddings
+        2. **Text-based keyword search on Entities** - Lexical matching on entity names/descriptions
+        3. **Entity graph search** - Structural matching with entity neighborhoods and relationships
+        4. **Direct chunk text search** - Keyword search in actual document text (Chunk nodes)
+
+        Each strategy retrieves source Chunks (actual text) to provide complete context.
+        Results are fused using Reciprocal Rank Fusion (RRF) for optimal ranking.
+
+        Args:
+            query: Search query
+            limit: Maximum number of final results to return
+            enable_vector: Enable vector similarity search on Entity nodes
+            enable_text: Enable text-based keyword search on Entity nodes
+            enable_entity: Enable entity graph search with neighborhoods
+            enable_chunk: Enable direct text search on Chunk content
+
+        Returns:
+            Formatted context string with fused results including:
+            - Entity information (name, official_name, description, type)
+            - Source chunks with actual text content from documents
+            - Related entities and relationships
+            - RRF fusion scores
+        """
+        print(f"\n[Hybrid Search] Query: {query[:60]}...")
+        print(f"[Hybrid Search] Strategies: Vector={enable_vector}, Text={enable_text}, Entity={enable_entity}, Chunk={enable_chunk}")
+
+        result_lists = []
+
+        # Strategy 1: Vector similarity search on Entity nodes
+        if enable_vector and self.embedding_model:
+            print("[Hybrid Search] Running vector similarity search on Entities...")
+            vector_results = self._vector_search_scored(query, limit=limit*2, threshold=0.4)
+            if vector_results:
+                result_lists.append(vector_results)
+                print(f"  ✓ Found {len(vector_results)} entity results")
+            else:
+                print(f"  ✗ No entity vector results")
+
+        # Strategy 2: Direct chunk text search
+        if enable_chunk:
+            print("[Hybrid Search] Running direct text search on Chunks...")
+            chunk_results = self._chunk_text_search_scored(query, limit=limit*2)
+            if chunk_results:
+                result_lists.append(chunk_results)
+                print(f"  ✓ Found {len(chunk_results)} chunk results")
+            else:
+                print(f"  ✗ No chunk text results")
+
+        # Strategy 3: Text-based search on Entity names/descriptions
+        if enable_text:
+            print("[Hybrid Search] Running text-based search on Entities...")
+            text_results = self._text_search_scored(query, limit=limit*2)
+            if text_results:
+                result_lists.append(text_results)
+                print(f"  ✓ Found {len(text_results)} entity text results")
+            else:
+                print(f"  ✗ No entity text results")
+
+        # Strategy 4: Entity graph search with neighborhoods
+        if enable_entity and self.embedding_model:
+            print("[Hybrid Search] Running entity graph search...")
+            entity_results = self._entity_search_scored(query, limit=limit)
+            if entity_results:
+                result_lists.append(entity_results)
+                print(f"  ✓ Found {len(entity_results)} entity graph results")
+            else:
+                print(f"  ✗ No entity graph results")
+
+        if not result_lists:
+            return f"No results found for query: {query}"
+
+        # Apply Reciprocal Rank Fusion
+        print(f"[Hybrid Search] Fusing results from {len(result_lists)} strategies using RRF...")
+        fused_results = self._reciprocal_rank_fusion(result_lists, k=60)
+
+        print(f"[Hybrid Search] Fused {len(fused_results)} unique results")
+        print(f"[Hybrid Search] Returning top {limit} results\n")
+
+        # Format and return top results
+        return self._format_hybrid_results(fused_results[:limit])
+
+    def close(self):
+        """Close the Neo4j connection."""
+        if hasattr(self, 'driver'):
+            self.driver.close()
+
+
+# Create global retriever instance
+_retriever = None
+
+
+def get_retriever() -> Neo4jRetriever:
+    """Get or create the Neo4j retriever instance."""
+    global _retriever
+    if _retriever is None:
+        _retriever = Neo4jRetriever()
+    return _retriever
+
+
