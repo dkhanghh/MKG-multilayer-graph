@@ -40,5 +40,8 @@ node_modules/
 llm_logs/
 logs/
 
-output
-test_data
+# pipeline test output and data
+.data/
+
+notebooks/.*
+.vscode
