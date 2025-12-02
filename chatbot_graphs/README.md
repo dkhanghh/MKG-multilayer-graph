@@ -420,11 +420,26 @@ AI: [Provides detailed comparison using graph relationships and semantic context
 - **Graceful handling**: Entities not found in graph are reported, not blocking
 - **Graph-first**: Uses relationship context before falling back to semantic search
 
+## Code Structure
+
+The retrieval logic has been modularized for better maintainability:
+
+- `chatbot_graphs/`
+  - `agent.py`: ReAct agent configuration and initialization
+  - `graph.py`: Main LangGraph workflow definition
+  - `nodes.py`: Graph nodes (preprocessing, agent execution)
+  - `retrievers/`: **NEW** Modular retrieval package
+    - `base.py`: Core Neo4j connection and base class
+    - `embeddings.py`: Embedding model management (Gemini, Ollama, SentenceTransformers)
+    - `search.py`: Vector, text, and hybrid search implementations
+    - `graph.py`: Graph traversal and subgraph retrieval implementations
+  - `tools/`: Tool definitions for the agent
+    - `search.py`: Search-related tools (vector, hybrid, etc.)
+    - `graph.py`: Graph-related tools (entity graph, semantic path, subgraph)
+
 ## Future Enhancements
 
-- [ ] Add hybrid search (combine text + vector scores)
 - [ ] Implement result caching
 - [ ] Add support for Neo4j vector indexes
-- [ ] Multi-hop relationship traversal
 - [ ] Query expansion and refinement
 - [ ] Conversation memory management

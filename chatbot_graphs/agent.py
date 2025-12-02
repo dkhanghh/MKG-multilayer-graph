@@ -32,7 +32,7 @@ def get_react_agent():
     if _react_agent is None:
         # Initialize ChatOpenAI
         base_url = os.getenv("CHAT_OPENAI_BASE_URL")
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("CHAT_OPENAI_API_KEY")
 
         # If using custom base_url without api_key, use "EMPTY" as recommended by LangChain
         # See: https://python.langchain.com/api_reference/openai/chat_models/langchain_openai.chat_models.base.ChatOpenAI.html
@@ -42,7 +42,7 @@ def get_react_agent():
         llm_kwargs = {
             "model": os.getenv("CHAT_LLM_MODEL", "gpt-4o-mini"),
             "temperature": float(os.getenv("LLM_TEMPERATURE", "0.1")),
-            "api_key": api_key
+            "api_key": api_key,
         }
 
         # Add base_url if provided
@@ -61,13 +61,13 @@ def get_react_agent():
         # Define tools for the agent
         # SPG-aware tools for Semantic Property Graph queries
         tools = [
-            neo4j_entity_graph_search_tool,  # Find relationships between specific entities
+            neo4j_question_subgraph_tool,  # Intelligent 5-stage subgraph retrieval (AUTO)
+            neo4j_hybrid_search_tool,      # Comprehensive hybrid search with RRF ranking
+            # neo4j_entity_graph_search_tool,  # Find relationships between specific entities
             # neo4j_typed_vector_search_tool,  # Type-filtered vector search (SPG-aware)
             # neo4j_semantic_path_search_tool,  # Multi-hop path search with properties
-            # neo4j_hybrid_search_tool,  # Comprehensive hybrid search with RRF ranking
-            neo4j_vector_search_tool,
+            # neo4j_vector_search_tool,
             # neo4j_retrieval_tool,
-            # neo4j_question_subgraph_tool,
         ]
 
         # Create ReAct agent
@@ -76,6 +76,8 @@ def get_react_agent():
         print("[ReAct Agent] Initialized with SPG-aware tools:")
         if neo4j_question_subgraph_tool in tools:
             print("  - Question Subgraph Tool: Intelligent 5-stage subgraph retrieval (AUTO)")
+        if neo4j_hybrid_search_tool in tools:
+            print("  - Hybrid Search Tool: Vector + Text + Entity Graph + Chunk Search (RRF)")
         if neo4j_entity_graph_search_tool in tools:
             print("  - Entity Graph Search: Find relationships between specific entities (with auto-expansion)")
         if neo4j_typed_vector_search_tool in tools:
