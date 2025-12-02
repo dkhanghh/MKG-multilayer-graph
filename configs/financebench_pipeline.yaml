@@ -47,9 +47,9 @@ pipeline:
       enabled: false  # Disabled since reader creates page-based chunks
       config:
         model_name: "jhu-clsp/mmBERT-small"
-        similarity_threshold: 0.95
+        similarity_threshold: 0.7
         min_chunk_length: 100
-        max_chunk_length: 500
+        max_chunk_length: 1000
 
     # Extractor: 3-step NER → STD → TRP extraction
     extractor:
