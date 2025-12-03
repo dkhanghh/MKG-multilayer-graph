@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from .state import ChatState
-from .retriever import Neo4jRetriever, get_retriever
+from .retrievers import Neo4jRetriever, get_retriever
 from .tools import (
     neo4j_retrieval_tool,
     neo4j_vector_search_tool,
