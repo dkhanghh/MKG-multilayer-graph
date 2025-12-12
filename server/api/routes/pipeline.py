@@ -9,13 +9,14 @@ from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 
 from server.api.models import PipelineRequest, PipelineResponse
-from server.core.config import DEFAULT_CONFIG
+from server.core.config import load_config
 from server.core.tracing import traceable
 from server.utils.helpers import convert_metrics_to_dict, add_tracing_metadata
 
 # Import pipeline components
 from knowledge_graphs.pipeline.langgraph_executor import PipelineWorkflow
 from knowledge_graphs.pipeline.batch_processor import process_directory_in_batches
+from knowledge_graphs.pipeline.csv_batch_processor import process_csv_in_batches
 
 router = APIRouter()
 
@@ -39,8 +40,8 @@ async def run_pipeline(request: PipelineRequest):
         # Add tracing metadata
         add_tracing_metadata("synchronous", request)
 
-        # Use custom config if provided, otherwise use default
-        config = request.config if request.config else DEFAULT_CONFIG.copy()
+        # Use custom config if provided, otherwise load from YAML or use default
+        config = request.config if request.config else load_config()
 
         # Update output path if provided
         if request.output_path:
@@ -92,8 +93,8 @@ async def run_pipeline_batch(request: PipelineRequest):
         # Add tracing metadata
         add_tracing_metadata("batch", request)
 
-        # Use custom config if provided, otherwise use default
-        config = request.config if request.config else DEFAULT_CONFIG.copy()
+        # Use custom config if provided, otherwise load from YAML or use default
+        config = request.config if request.config else load_config()
 
         # Update output path if provided
         if request.output_path:
@@ -104,6 +105,67 @@ async def run_pipeline_batch(request: PipelineRequest):
             request.input_path,
             config,
             batch_size=request.batch_size
+        )
+
+        # Convert to response model
+        response = PipelineResponse(
+            pipeline_id=results["pipeline_id"],
+            status=results["status"],
+            input_path=results["input_path"],
+            output_path=results.get("output_path"),
+            metrics=convert_metrics_to_dict(results.get("metrics")),
+            errors=results.get("errors", []),
+            execution_summary=results.get("execution_summary"),
+            timestamp=datetime.utcnow().isoformat()
+        )
+
+        return response
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/run-csv-batch", response_model=PipelineResponse)
+@traceable(name="pipeline_run_csv_batch")
+async def run_csv_batch_pipeline(request: PipelineRequest):
+    """
+    Run the pipeline on a CSV file processing rows in batches.
+
+    This endpoint is specifically designed for large CSV files. Instead of
+    loading all rows at once, it:
+    1. Reads the CSV file incrementally
+    2. Splits rows into batches
+    3. Processes each batch separately
+    4. Aggregates results
+
+    This avoids memory issues with large CSV files and allows for better
+    progress tracking.
+
+    Args:
+        request: Pipeline execution request with batch_size parameter
+
+    Returns:
+        Aggregated pipeline execution results from all row batches
+
+    Raises:
+        HTTPException: If CSV batch processing fails
+    """
+    try:
+        # Add tracing metadata
+        add_tracing_metadata("csv_batch", request)
+
+        # Use custom config if provided, otherwise load from YAML or use default
+        config = request.config if request.config else load_config()
+
+        # Update output path if provided
+        output_dir = request.output_path if request.output_path else "./output/csv_batches"
+
+        # Process CSV in row-based batches
+        results = process_csv_in_batches(
+            request.input_path,
+            config,
+            batch_size=request.batch_size,
+            output_dir=output_dir
         )
 
         # Convert to response model
@@ -143,8 +205,8 @@ async def run_pipeline_async(request: PipelineRequest):
         # Add tracing metadata
         add_tracing_metadata("asynchronous", request)
 
-        # Use custom config if provided, otherwise use default
-        config = request.config if request.config else DEFAULT_CONFIG.copy()
+        # Use custom config if provided, otherwise load from YAML or use default
+        config = request.config if request.config else load_config()
 
         # Update output path if provided
         if request.output_path:
@@ -190,8 +252,8 @@ async def stream_pipeline(request: PipelineRequest):
         HTTPException: If streaming fails to start
     """
     try:
-        # Use custom config if provided, otherwise use default
-        config = request.config if request.config else DEFAULT_CONFIG.copy()
+        # Use custom config if provided, otherwise load from YAML or use default
+        config = request.config if request.config else load_config()
 
         # Update output path if provided
         if request.output_path:
@@ -257,7 +319,7 @@ async def upload_and_run_pipeline(
             temp_file.write(content)
 
         # Parse config if provided
-        pipeline_config = DEFAULT_CONFIG.copy()
+        pipeline_config = load_config()
         if config:
             try:
                 custom_config = json.loads(config)

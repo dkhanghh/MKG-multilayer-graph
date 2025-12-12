@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.api.routes import health, pipeline, config
+from server.api.routes import health, pipeline, config, auth, chat, graph
 from server.core.tracing import setup_langsmith_tracing
 from server.core.logging_config import setup_logging
 
@@ -62,6 +62,9 @@ def create_app() -> FastAPI:
     app.include_router(health.router, tags=["Health"])
     app.include_router(pipeline.router, prefix="/pipeline", tags=["Pipeline"])
     app.include_router(config.router, prefix="/pipeline", tags=["Configuration"])
+    app.include_router(auth.router, tags=["Authentication"])
+    app.include_router(chat.router, prefix="/chat", tags=["Chat"])
+    app.include_router(graph.router, prefix="/graph", tags=["Graph"])
 
     logger.info("FastAPI application created successfully")
 
