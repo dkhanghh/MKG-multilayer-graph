@@ -61,7 +61,7 @@ def get_react_agent():
         # Define tools for the agent
         # SPG-aware tools for Semantic Property Graph queries
         tools = [
-            neo4j_question_subgraph_tool,  # Intelligent 5-stage subgraph retrieval (AUTO)
+            # neo4j_question_subgraph_tool,  # Intelligent 5-stage subgraph retrieval (AUTO)
             neo4j_hybrid_search_tool,      # Comprehensive hybrid search with RRF ranking
             # neo4j_entity_graph_search_tool,  # Find relationships between specific entities
             # neo4j_typed_vector_search_tool,  # Type-filtered vector search (SPG-aware)

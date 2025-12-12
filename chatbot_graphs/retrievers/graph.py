@@ -123,6 +123,7 @@ class GraphMixin:
 
         try:
             print(f"\n[Subgraph Retrieval] Question: {question}")
+            question_lower = question.lower()
 
             with self.driver.session(database=self.database) as session:
                 # Stage 1: Identify seed entities using vector similarity on the full question

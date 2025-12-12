@@ -145,15 +145,12 @@ def neo4j_semantic_path_search_tool(
     print(f"\n[Semantic Path Search] Finding paths: '{start_entity}' → '{end_entity}'")
     print(f"  Max hops: {max_hops}")
     if path_relationship_types:
-        print(f"  Relationship type filter: {path_relationship_types}")
+        print(f"  Note: Relationship type filter '{path_relationship_types}' is not yet implemented")
 
     result = retriever.semantic_path_search(
         start_entity=start_entity,
         end_entity=end_entity,
-        max_hops=max_hops,
-        path_relationship_types=path_relationship_types,
-        return_all_paths=True,
-        limit_paths=10
+        max_hops=max_hops
     )
 
     return result
