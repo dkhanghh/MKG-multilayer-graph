@@ -45,3 +45,9 @@ logs/
 
 notebooks/.*
 .vscode
+
+examples
+.deepeval
+configs
+output
+scripts
