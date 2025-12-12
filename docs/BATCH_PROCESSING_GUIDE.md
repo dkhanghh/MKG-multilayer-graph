@@ -107,7 +107,7 @@ print(response.json())
 python -c "
 import yaml
 import json
-with open('configs/financebench_pipeline.yaml') as f:
+with open('configs/vn30_pipeline.yaml') as f:
     config = yaml.safe_load(f)
 with open('/tmp/config.json', 'w') as f:
     json.dump(config, f)
