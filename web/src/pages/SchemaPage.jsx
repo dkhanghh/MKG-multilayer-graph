@@ -15,11 +15,11 @@ const SchemaPage = () => {
     const fetchConfig = async () => {
         setLoading(true);
         try {
-            const response = await api.get('/pipeline/config');
-            setConfig(JSON.stringify(response.data.config, null, 2));
+            const response = await api.get('/pipeline/schema');
+            setConfig(response.data.content);
         } catch (error) {
-            console.error("Failed to fetch config", error);
-            setMessage({ type: 'error', text: 'Failed to load configuration.' });
+            console.error("Failed to fetch schema", error);
+            setMessage({ type: 'error', text: 'Failed to load schema configuration.' });
         }
         setLoading(false);
     };
@@ -28,13 +28,11 @@ const SchemaPage = () => {
         setSaving(true);
         setMessage(null);
         try {
-            // Validate JSON
-            JSON.parse(config);
-
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate network request
-            setMessage({ type: 'success', text: 'Configuration saved successfully (Simulation).' });
+            await api.post('/pipeline/schema', { content: config });
+            setMessage({ type: 'success', text: 'Schema saved successfully.' });
         } catch (error) {
-            setMessage({ type: 'error', text: 'Invalid JSON format.' });
+            console.error("Failed to save schema", error);
+            setMessage({ type: 'error', text: 'Failed to save schema.' });
         }
         setSaving(false);
     };
@@ -71,8 +69,8 @@ const SchemaPage = () => {
 
             {message && (
                 <div className={`p-4 mb-8 rounded-[20px] flex items-center animate-slide-up shadow-sm border ${message.type === 'success'
-                        ? 'bg-green-50 border-green-200 text-green-800'
-                        : 'bg-red-50 border-red-200 text-red-800'
+                    ? 'bg-green-50 border-green-200 text-green-800'
+                    : 'bg-red-50 border-red-200 text-red-800'
                     }`}>
                     <div className={`h-8 w-8 rounded-full flex items-center justify-center mr-3 ${message.type === 'success' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'
                         }`}>
@@ -86,7 +84,7 @@ const SchemaPage = () => {
                 <div className="bg-[#2d2d2d] px-6 py-3 flex items-center justify-between border-b border-[#3e3e3e]">
                     <div className="flex items-center text-gray-300 text-sm font-medium">
                         <Settings size={16} className="mr-2 text-primary-400" />
-                        <span className="opacity-80">pipeline_config.json</span>
+                        <span className="opacity-80">financebench_spg.schema</span>
                     </div>
                     <div className="flex space-x-2">
                         <div className="w-3 h-3 rounded-full bg-[#ff5f56]"></div>
@@ -112,7 +110,7 @@ const SchemaPage = () => {
                             style={{ fontFamily: "'Fira Code', 'Roboto Mono', monospace" }}
                         />
                         <div className="absolute bottom-4 right-4 text-xs text-gray-600 bg-[#2d2d2d] px-3 py-1 rounded-full">
-                            JSON
+                            SPG
                         </div>
                     </div>
                 )}
