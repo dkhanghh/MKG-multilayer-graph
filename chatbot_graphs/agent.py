@@ -2,9 +2,11 @@
 ReAct agent setup for RAG chatbot.
 """
 import os
+import datetime
+import pytz
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from .state import ChatState
@@ -62,7 +64,7 @@ def get_react_agent():
         # SPG-aware tools for Semantic Property Graph queries
         tools = [
             # neo4j_question_subgraph_tool,  # Intelligent 5-stage subgraph retrieval (AUTO)
-            neo4j_hybrid_search_tool,      # Comprehensive hybrid search with RRF ranking
+            # neo4j_hybrid_search_tool,      # Comprehensive hybrid search with RRF ranking
             # neo4j_entity_graph_search_tool,  # Find relationships between specific entities
             # neo4j_typed_vector_search_tool,  # Type-filtered vector search (SPG-aware)
             # neo4j_semantic_path_search_tool,  # Multi-hop path search with properties
@@ -70,7 +72,12 @@ def get_react_agent():
             # neo4j_retrieval_tool,
         ]
 
-        prompt = """Bạn là trợ lý phân tích tài chính chuyên về báo cáo tài chính công ty Việt Nam.
+        # Get current time in UTC+7
+        tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        current_time = datetime.datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        prompt = f"""Bạn là trợ lý phân tích tài chính chuyên về báo cáo tài chính công ty Việt Nam.
+Thời gian hiện tại: {current_time} (UTC+7)
 
 # Nguyên tắc trả lời:
 1. **Trả lời trực tiếp** câu hỏi của người dùng với số liệu cụ thể
@@ -113,14 +120,14 @@ Con số này tăng 8% so với cùng kỳ năm trước, cho thấy tốc độ
 ---
 
 Sử dụng công cụ neo4j_hybrid_search_tool để lấy dữ liệu từ knowledge graph. Công cụ này trả về:
-- Thông tin entity (công ty, báo cáo tài chính)b
+- Thông tin entity (công ty, báo cáo tài chính)
 - Quan hệ với TOÀN BỘ thuộc tính (revenue, profit, period, v.v.)
 - Source chunks để tham khảo
 
 CHỈ gọi công cụ 1-2 LẦN để tìm đủ thông tin, sau đó trả lời ngay dựa trên kết quả."""
 
         # Create ReAct agent
-        _react_agent = create_react_agent(_llm, tools)
+        _react_agent = create_react_agent(_llm, tools, prompt=prompt)
 
         print("[ReAct Agent] Initialized with SPG-aware tools:")
         if neo4j_question_subgraph_tool in tools:
@@ -133,6 +140,26 @@ CHỈ gọi công cụ 1-2 LẦN để tìm đủ thông tin, sau đó trả l�
             print("  - Typed Vector Search: Type-filtered semantic search (Company, Executive, etc.)")
         if neo4j_semantic_path_search_tool in tools:
             print("  - Semantic Path Search: Multi-hop connection discovery with properties")
+
+        # Load and add MCP tools
+        try:
+            from chatbot_graphs.tools.mcp import get_mcp_tools
+            print("[ReAct Agent] Loading MCP tools...")
+            mcp_tools = get_mcp_tools()
+            if mcp_tools:
+                tools.extend(mcp_tools)
+                print(f"[ReAct Agent] Added {len(mcp_tools)} MCP tools:")
+                for tool in mcp_tools:
+                    print(f"  - {tool.name}: {tool.description[:100]}...")
+            else:
+                print("[ReAct Agent] No MCP tools loaded (check connection or config)")
+        except ImportError as e:
+            print(f"[ReAct Agent] Could not import MCP tools: {e}")
+        except Exception as e:
+            print(f"[ReAct Agent] Error loading MCP tools: {e}")
+
+        # Re-create agent with updated tool list
+        _react_agent = create_react_agent(_llm, tools, prompt=prompt)
 
     return _react_agent
 

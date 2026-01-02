@@ -100,7 +100,8 @@ def main():
         port=port,
         reload=reload,
         log_level=log_level,
-        access_log=True
+        access_log=True,
+        loop="asyncio"  # Required for nest_asyncio to work with Uvicorn
     )
 
     return 0

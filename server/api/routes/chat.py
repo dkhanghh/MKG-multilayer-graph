@@ -32,8 +32,8 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_ac
         # Add current message
         messages.append(HumanMessage(content=request.message))
         
-        # Invoke agent
-        result = agent.invoke({"messages": messages})
+        # Invoke agent asynchronously to support async tools (like MCP)
+        result = await agent.ainvoke({"messages": messages})
         
         # Get last message content
         last_message = result["messages"][-1]

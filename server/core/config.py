@@ -64,6 +64,34 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     }
 }
 
+# MCP Configuration
+MCP_SETTINGS = {
+    "servers": {
+        "information_tools-mcp": {
+            "transport": "sse",
+            "url": "https://dev-mcp-server-v3.stock-gpt.ai/sse",
+            "enabled_tools": [
+                # "get_current_price",
+                # "get_market_data_by_symbol",
+                "get_financial_data",
+                "get_ratio_data",
+                # "get_indicator_details",
+                "get_industry_metrics",
+                # "get_commodity_echart_data",
+                # "get_top_companies_by_financial_metrics",
+                # "get_top_foreign_buy_stocks",
+                # "get_top_market_cap_stocks",
+                # "get_top_trading_value_stocks",
+                # "get_top_companies_by_valuation_data",
+                # "get_top_companies_by_market_data",
+                # "get_top_industry_metrics_by_search",
+                # "calculate_index_return_excluding_stocks",
+                # "calculate_index_ytd_contribution",
+            ],
+        }
+    }
+}
+
 
 def load_config(config_path: str = None) -> Dict[str, Any]:
     """

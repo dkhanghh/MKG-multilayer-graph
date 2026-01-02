@@ -7,7 +7,7 @@ name = "thesis-llms-multilayer-graph"
 version = "0.1.0"
 description = "A knowledge graph construction pipeline using LangGraph for RAG applications"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "Duy Khang", email = "huynhduykhang.t13cla@gmail.com"}
@@ -41,28 +41,23 @@ dependencies = [
     "langgraph-cli[inmem]>=0.4.0",
     "langchain-core>=0.1.0",
     "langchain-openai>=0.1.0",
-
     # LangSmith tracing
     "langsmith>=0.1.0",
     "langchain>=0.1.0",
-
     # Document processing
     "pypdf>=3.0.0",
     "python-docx>=0.8.11",
     "python-pptx>=0.6.21",
-
     # Machine Learning
     "sentence-transformers>=2.2.0",
     "openai>=1.0.0",
     "ollama>=0.1.7",
     "google-genai>=1.36.0",
     "nltk>=3.8.0",
-
     # Data processing
     "pandas>=1.5.0",
     "numpy>=1.24.0",
     "scikit-learn>=1.3.0",
-
     # Configuration and utilities
     "pyyaml>=6.0",
     "pydantic>=2.0.0",
@@ -70,21 +65,20 @@ dependencies = [
     "tqdm>=4.65.0",
     "requests>=2.31.0",
     "jinja2>=3.0.0",
-
     # Web server dependencies
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "python-multipart>=0.0.6",
     "python-dotenv>=1.0.0",
-
     # Graph database support
     "neo4j>=5.0.0",
-
     # Evaluation dependencies
     "pymilvus>=2.6.2",
     "deepeval>=3.6.7",
     "datasets>=4.2.0",
     "ipywidgets>=8.1.7",
+    "mcp[cli]>=1.25.0",
+    "langchain-mcp-adapters>=0.2.1",
 ]
 
 [project.optional-dependencies]
