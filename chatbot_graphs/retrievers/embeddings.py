@@ -118,3 +118,39 @@ class EmbeddingHandler:
             return self.embedding_model.encode(text).tolist()
         else:
             raise ValueError(f"Unknown embedding type: {self.embedding_type}")
+
+    def _get_or_generate_embedding(self, text: str, cache_key: str = None) -> list:
+        """
+        Generate embedding with caching to avoid duplicate generation.
+
+        This significantly improves performance in hybrid search where the same
+        query embedding is needed by multiple strategies.
+
+        Args:
+            text: Text to generate embedding for
+            cache_key: Optional cache key (defaults to first 100 chars of text)
+
+        Returns:
+            Embedding vector as list of floats
+        """
+        # Initialize cache if not present
+        if not hasattr(self, '_embedding_cache'):
+            self._embedding_cache = {}
+
+        # Use first 100 chars as cache key if not provided
+        key = cache_key or text[:100]
+
+        # Return cached embedding if available
+        if key in self._embedding_cache:
+            return self._embedding_cache[key]
+
+        # Generate and cache new embedding
+        embedding = self.generate_embedding(text)
+        self._embedding_cache[key] = embedding
+
+        return embedding
+
+    def clear_embedding_cache(self):
+        """Clear the embedding cache to free memory."""
+        if hasattr(self, '_embedding_cache'):
+            self._embedding_cache.clear()

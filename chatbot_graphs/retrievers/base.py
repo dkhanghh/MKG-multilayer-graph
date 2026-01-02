@@ -46,6 +46,18 @@ class Neo4jRetrieverBase:
         """Generate embedding for text using the configured model."""
         return self.embedding_handler.generate_embedding(text)
 
+    def _get_or_generate_embedding(self, text: str, cache_key: str = None) -> list:
+        """
+        Generate embedding with caching to avoid duplicate generation.
+
+        Delegates to the embedding handler which manages the cache.
+        """
+        return self.embedding_handler._get_or_generate_embedding(text, cache_key)
+
+    def clear_embedding_cache(self):
+        """Clear the embedding cache to free memory."""
+        return self.embedding_handler.clear_embedding_cache()
+
     def close(self):
         """Close the Neo4j connection."""
         if hasattr(self, 'driver'):

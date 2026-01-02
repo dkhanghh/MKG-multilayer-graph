@@ -10,6 +10,8 @@ import json
 import logging
 import time
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
@@ -31,7 +33,14 @@ class CSVBatchProcessor:
     5. Aggregates results
     """
 
-    def __init__(self, config: Dict[str, Any], batch_size: int = 100, enable_checkpointing: bool = True):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        batch_size: int = 100,
+        enable_checkpointing: bool = True,
+        max_workers: int = 4,
+        enable_parallel: bool = True
+    ):
         """
         Initialize CSV batch processor.
 
@@ -39,13 +48,27 @@ class CSVBatchProcessor:
             config: Pipeline configuration
             batch_size: Number of CSV rows to process per batch (default: 100)
             enable_checkpointing: Enable checkpoint/resume functionality (default: True)
+            max_workers: Maximum number of parallel workers (default: 4)
+            enable_parallel: Enable parallel batch processing (default: True)
         """
         self.config = config
         self.batch_size = batch_size
         self.enable_checkpointing = enable_checkpointing
+        self.max_workers = max_workers
+        self.enable_parallel = enable_parallel
         self.workflow = PipelineWorkflow(config=config)
 
-        logger.info(f"Initialized CSV batch processor with batch_size={batch_size} rows, checkpointing={enable_checkpointing}")
+        # Thread-safe locks for shared resources
+        self._results_lock = threading.Lock()
+        self._metrics_lock = threading.Lock()
+        self._errors_lock = threading.Lock()
+        self._checkpoint_lock = threading.Lock()
+
+        logger.info(
+            f"Initialized CSV batch processor with batch_size={batch_size} rows, "
+            f"checkpointing={enable_checkpointing}, parallel={enable_parallel}, "
+            f"max_workers={max_workers if enable_parallel else 'N/A'}"
+        )
 
     def _get_checkpoint_path(self, output_dir: str) -> Path:
         """
@@ -242,47 +265,30 @@ class CSVBatchProcessor:
             # Read CSV and create batches
             batches = self._create_row_batches(csv_path, headers, temp_dir)
 
-            # Process only remaining batches
-            for batch_num in range(start_batch_num, len(batches) + 1):
-                batch_info = batches[batch_num - 1]
-                logger.info(
-                    f"Processing batch {batch_num}/{len(batches)} "
-                    f"(rows {batch_info['start_row']}-{batch_info['end_row']})"
-                )
-
-                batch_result = self._process_batch(
-                    batch_info,
-                    batch_num,
-                    output_dir,
-                    **kwargs
-                )
-
-                all_results.append(batch_result)
-
-                # Aggregate metrics
-                if batch_result.get("metrics"):
-                    self._merge_metrics(aggregated_metrics, batch_result["metrics"])
-
-                # Collect errors
-                if batch_result.get("errors"):
-                    all_errors.extend(batch_result["errors"])
-
-                logger.info(
-                    f"Batch {batch_num}/{len(batches)} completed. "
-                    f"Rows: {batch_info['row_count']}, "
-                    f"Nodes: {batch_result.get('execution_summary', {}).get('total_nodes', 0)}, "
-                    f"Edges: {batch_result.get('execution_summary', {}).get('total_edges', 0)}"
-                )
-
-                # Save checkpoint after each batch
-                self._save_checkpoint(
+            # Choose parallel or sequential processing
+            if self.enable_parallel and len(batches) > 1:
+                # Parallel processing for multiple batches
+                self._process_batches_parallel(
+                    batches=batches,
+                    start_batch_num=start_batch_num,
                     output_dir=output_dir,
-                    csv_path=csv_path,
-                    total_batches=len(batches),
-                    completed_batches=batch_num,
                     all_results=all_results,
                     aggregated_metrics=aggregated_metrics,
-                    all_errors=all_errors
+                    all_errors=all_errors,
+                    csv_path=csv_path,
+                    **kwargs
+                )
+            else:
+                # Sequential processing (single batch or parallel disabled)
+                self._process_batches_sequential(
+                    batches=batches,
+                    start_batch_num=start_batch_num,
+                    output_dir=output_dir,
+                    all_results=all_results,
+                    aggregated_metrics=aggregated_metrics,
+                    all_errors=all_errors,
+                    csv_path=csv_path,
+                    **kwargs
                 )
 
         finally:
@@ -534,6 +540,191 @@ class CSVBatchProcessor:
                 }
             }
 
+    def _process_batches_sequential(
+        self,
+        batches: List[Dict[str, Any]],
+        start_batch_num: int,
+        output_dir: str,
+        all_results: List[Dict[str, Any]],
+        aggregated_metrics: PipelineMetrics,
+        all_errors: List[str],
+        csv_path: str,
+        **kwargs
+    ) -> None:
+        """
+        Process batches sequentially (original implementation).
+
+        Args:
+            batches: List of batch info dictionaries
+            start_batch_num: Starting batch number (for resume)
+            output_dir: Output directory
+            all_results: List to append results to
+            aggregated_metrics: Metrics object to update
+            all_errors: List to append errors to
+            csv_path: Path to CSV file (for checkpointing)
+            **kwargs: Additional parameters
+        """
+        # Process only remaining batches
+        for batch_num in range(start_batch_num, len(batches) + 1):
+            batch_info = batches[batch_num - 1]
+            logger.info(
+                f"Processing batch {batch_num}/{len(batches)} "
+                f"(rows {batch_info['start_row']}-{batch_info['end_row']})"
+            )
+
+            batch_result = self._process_batch(
+                batch_info,
+                batch_num,
+                output_dir,
+                **kwargs
+            )
+
+            all_results.append(batch_result)
+
+            # Aggregate metrics
+            if batch_result.get("metrics"):
+                self._merge_metrics(aggregated_metrics, batch_result["metrics"])
+
+            # Collect errors
+            if batch_result.get("errors"):
+                all_errors.extend(batch_result["errors"])
+
+            logger.info(
+                f"Batch {batch_num}/{len(batches)} completed. "
+                f"Rows: {batch_info['row_count']}, "
+                f"Nodes: {batch_result.get('execution_summary', {}).get('total_nodes', 0)}, "
+                f"Edges: {batch_result.get('execution_summary', {}).get('total_edges', 0)}"
+            )
+
+            # Save checkpoint after each batch
+            self._save_checkpoint(
+                output_dir=output_dir,
+                csv_path=csv_path,
+                total_batches=len(batches),
+                completed_batches=batch_num,
+                all_results=all_results,
+                aggregated_metrics=aggregated_metrics,
+                all_errors=all_errors
+            )
+
+    def _process_batch_with_sync(
+        self,
+        batch_info: Dict[str, Any],
+        batch_num: int,
+        output_dir: str,
+        all_results: List[Dict[str, Any]],
+        aggregated_metrics: PipelineMetrics,
+        all_errors: List[str],
+        csv_path: str,
+        total_batches: int,
+        **kwargs
+    ) -> None:
+        """
+        Process a batch and synchronize shared resources (thread-safe).
+
+        Args:
+            batch_info: Batch information dictionary
+            batch_num: Batch number
+            output_dir: Output directory
+            all_results: Shared results list
+            aggregated_metrics: Shared metrics object
+            all_errors: Shared errors list
+            csv_path: Path to CSV file (for checkpointing)
+            total_batches: Total number of batches
+            **kwargs: Additional parameters
+        """
+        logger.info(
+            f"Processing batch {batch_num}/{total_batches} "
+            f"(rows {batch_info['start_row']}-{batch_info['end_row']})"
+        )
+
+        # Process batch (no lock needed - independent operation)
+        batch_result = self._process_batch(
+            batch_info, batch_num, output_dir, **kwargs
+        )
+
+        # Thread-safe updates to shared resources
+        with self._results_lock:
+            all_results.append(batch_result)
+
+        with self._metrics_lock:
+            if batch_result.get("metrics"):
+                self._merge_metrics(aggregated_metrics, batch_result["metrics"])
+
+        with self._errors_lock:
+            if batch_result.get("errors"):
+                all_errors.extend(batch_result["errors"])
+
+        # Thread-safe checkpoint save
+        with self._checkpoint_lock:
+            completed_count = len(all_results)
+            self._save_checkpoint(
+                output_dir=output_dir,
+                csv_path=csv_path,
+                total_batches=total_batches,
+                completed_batches=completed_count,
+                all_results=all_results.copy(),  # Copy to avoid race conditions
+                aggregated_metrics=aggregated_metrics,
+                all_errors=all_errors.copy()
+            )
+
+        logger.info(
+            f"Batch {batch_num}/{total_batches} completed. "
+            f"Rows: {batch_info['row_count']}, "
+            f"Nodes: {batch_result.get('execution_summary', {}).get('total_nodes', 0)}, "
+            f"Edges: {batch_result.get('execution_summary', {}).get('total_edges', 0)}"
+        )
+
+    def _process_batches_parallel(
+        self,
+        batches: List[Dict[str, Any]],
+        start_batch_num: int,
+        output_dir: str,
+        all_results: List[Dict[str, Any]],
+        aggregated_metrics: PipelineMetrics,
+        all_errors: List[str],
+        csv_path: str,
+        **kwargs
+    ) -> None:
+        """
+        Process batches in parallel using ThreadPoolExecutor.
+
+        Args:
+            batches: List of batch info dictionaries
+            start_batch_num: Starting batch number (for resume)
+            output_dir: Output directory
+            all_results: List to append results to
+            aggregated_metrics: Metrics object to update
+            all_errors: List to append errors to
+            csv_path: Path to CSV file (for checkpointing)
+            **kwargs: Additional parameters
+        """
+        logger.info(f"Starting parallel processing with {self.max_workers} workers")
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all remaining batches
+            futures = {}
+            for batch_num in range(start_batch_num, len(batches) + 1):
+                batch_info = batches[batch_num - 1]
+                future = executor.submit(
+                    self._process_batch_with_sync,
+                    batch_info, batch_num, output_dir,
+                    all_results, aggregated_metrics, all_errors,
+                    csv_path, len(batches), **kwargs
+                )
+                futures[batch_num] = future
+
+            # Collect results as they complete
+            for batch_num in sorted(futures.keys()):
+                future = futures[batch_num]
+                try:
+                    future.result(timeout=600)  # 10 min timeout per batch
+                    logger.info(f"✓ Batch {batch_num}/{len(batches)} completed successfully")
+                except Exception as e:
+                    logger.error(f"✗ Batch {batch_num}/{len(batches)} failed: {e}")
+                    with self._errors_lock:
+                        all_errors.append(f"Batch {batch_num} failed: {str(e)}")
+
     def _merge_metrics(
         self,
         target: PipelineMetrics,
@@ -611,6 +802,8 @@ def process_csv_in_batches(
     batch_size: int = 100,
     output_dir: str = "./output/csv_batches",
     enable_checkpointing: bool = True,
+    max_workers: int = 4,
+    enable_parallel: bool = True,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -622,6 +815,8 @@ def process_csv_in_batches(
         batch_size: Number of rows per batch (default: 100)
         output_dir: Directory for batch outputs
         enable_checkpointing: Enable checkpoint/resume functionality (default: True)
+        max_workers: Maximum number of parallel workers (default: 4)
+        enable_parallel: Enable parallel batch processing (default: True)
         **kwargs: Additional parameters
 
     Returns:
@@ -632,12 +827,22 @@ def process_csv_in_batches(
         >>> from knowledge_graphs.pipeline.config import load_config
         >>>
         >>> config = load_config("examples/config_vn30_csv.yaml")
+        >>> # Parallel processing (default)
         >>> results = process_csv_in_batches(
         ...     ".data/data_vn30_first_100.csv",
         ...     config,
-        ...     batch_size=100
+        ...     batch_size=100,
+        ...     max_workers=4
         ... )
         >>> print(f"Processed {results['execution_summary']['total_rows']} rows")
+
+        # Sequential processing (disable parallel)
+        >>> results = process_csv_in_batches(
+        ...     ".data/data_vn30_first_100.csv",
+        ...     config,
+        ...     batch_size=100,
+        ...     enable_parallel=False
+        ... )
 
         # To resume from a failed run, just call again with same output_dir:
         >>> results = process_csv_in_batches(
@@ -647,5 +852,11 @@ def process_csv_in_batches(
         ...     output_dir="./output/vn30_batches"  # Same output_dir as before
         ... )
     """
-    processor = CSVBatchProcessor(config, batch_size=batch_size, enable_checkpointing=enable_checkpointing)
+    processor = CSVBatchProcessor(
+        config,
+        batch_size=batch_size,
+        enable_checkpointing=enable_checkpointing,
+        max_workers=max_workers,
+        enable_parallel=enable_parallel
+    )
     return processor.process_csv_in_batches(csv_path, output_dir, **kwargs)

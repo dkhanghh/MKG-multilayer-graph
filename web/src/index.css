@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+@theme {
+  /* Google Material 3 Blue (Primary) */
+  --color-primary-50: #e8f0fe;
+  --color-primary-100: #d2e3fc;
+  --color-primary-200: #a7c7fa;
+  --color-primary-300: #7cacf8;
+  --color-primary-400: #5191f6;
+  --color-primary-500: #1a73e8; /* Google Blue */
+  --color-primary-600: #1967d2;
+  --color-primary-700: #185abc;
+  --color-primary-800: #174ea6;
+  --color-primary-900: #174ea6;
+
+  /* Neutral / Surface Colors */
+  --color-secondary-50: #f8f9fa; /* Google Grey 50 */
+  --color-secondary-100: #f1f3f4;
+  --color-secondary-200: #e8eaed;
+  --color-secondary-300: #dadce0;
+  --color-secondary-400: #bdc1c6;
+  --color-secondary-500: #9aa0a6;
+  --color-secondary-600: #80868b;
+  --color-secondary-700: #5f6368;
+  --color-secondary-800: #3c4043;
+  --color-secondary-900: #202124;
+
+  /* Typography */
+  --font-sans: 'Google Sans', 'Roboto', 'Inter', system-ui, sans-serif;
+
+  --animate-fade-in: fadeIn 0.4s cubic-bezier(0.2, 0.0, 0, 1.0);
+  --animate-slide-up: slideUp 0.4s cubic-bezier(0.2, 0.0, 0, 1.0);
+
+  @keyframes fadeIn {
+    0% { opacity: 0; }
+    100% { opacity: 1; }
+  }
+  @keyframes slideUp {
+    0% { transform: translateY(10px); opacity: 0; }
+    100% { transform: translateY(0); opacity: 1; }
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-secondary-50 text-secondary-900 antialiased font-sans;
+  }
+}
+
+@layer components {
+  /* M3 Filled Button */
+  .btn-primary {
+    @apply px-6 py-2.5 bg-primary-500 text-white rounded-full hover:bg-primary-600 hover:shadow-md transition-all duration-200 font-medium text-sm tracking-wide focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none flex items-center justify-center gap-2;
+  }
+  
+  /* M3 Outlined Button */
+  .btn-secondary {
+    @apply px-6 py-2.5 bg-transparent text-primary-600 border border-secondary-300 rounded-full hover:bg-primary-50 hover:border-primary-200 transition-all duration-200 font-medium text-sm tracking-wide focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 flex items-center justify-center gap-2;
+  }
+  
+  /* M3 Text Button */
+  .btn-text {
+    @apply px-4 py-2 bg-transparent text-primary-600 rounded-full hover:bg-primary-50 transition-colors duration-200 font-medium text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 flex items-center justify-center gap-2;
+  }
+
+  /* M3 Outlined Text Field */
+  .input-field {
+    @apply w-full px-4 py-3 bg-white border border-secondary-300 rounded-[16px] text-secondary-900 placeholder-secondary-500 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none transition-all duration-200 text-base;
+  }
+
+  /* M3 Elevated Card */
+  .card {
+    @apply bg-white rounded-[24px] shadow-sm border border-secondary-200/60 p-6 hover:shadow-md transition-shadow duration-200;
+  }
+  
+  /* M3 Surface Container */
+  .surface-container {
+    @apply bg-secondary-100 rounded-[28px] p-4;
+  }
+}

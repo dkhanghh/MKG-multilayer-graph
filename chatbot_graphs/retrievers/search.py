@@ -1,6 +1,7 @@
 """
 Search capabilities for Neo4j Retriever.
 """
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class SearchMixin:
     """Mixin class for search functionality."""
@@ -421,33 +422,83 @@ class SearchMixin:
     def _reciprocal_rank_fusion(self, result_lists: list[list[dict]], k: int = 60) -> list[dict]:
         """
         Fuse multiple ranked result lists using Reciprocal Rank Fusion (RRF).
+
+        Combines rank-based and score-based approaches:
+        - RRF rank score: 1/(k + rank) for democratic voting across strategies
+        - Original score weighting: Incorporates search quality (similarity scores)
+        - Data merging: When entity appears in multiple results, merges chunk/relationship data
+
+        Args:
+            result_lists: List of ranked result lists from different strategies
+            k: RRF parameter to control rank-based scoring (default: 60)
+
+        Returns:
+            Fused results sorted by combined score
         """
         scores = {}
 
         for result_list in result_lists:
             for rank, result in enumerate(result_list, start=1):
-                entity_id = result.get('id') or result.get('name')  # Use id or name as key
-                score = 1.0 / (k + rank)
+                entity_id = result.get('id')
+                if not entity_id:  # Skip results without proper ID
+                    continue
+
+                # Calculate RRF rank score
+                rrf_score = 1.0 / (k + rank)
+
+                # Get original search score (similarity, match quality, etc.)
+                original_score = result.get('score', 0.0)
+
+                # Weighted combination: 30% RRF + 70% original score
+                # This balances consensus (RRF) with search quality (original)
+                combined_score = 0.3 * rrf_score + 0.7 * original_score
 
                 if entity_id not in scores:
                     scores[entity_id] = {
-                        'result': result,
-                        'rrf_score': 0.0,
-                        'sources': []  # Track which strategies found this result
+                        'result': result.copy(),  # Copy to avoid mutation
+                        'combined_score': 0.0,
+                        'sources': set()  # Use set to avoid duplicate sources
                     }
-                scores[entity_id]['rrf_score'] += score
-                scores[entity_id]['sources'].append(result.get('source', 'unknown'))
+                else:
+                    # Merge chunk and relationship data from duplicate results
+                    existing = scores[entity_id]['result']
 
-        # Sort by RRF score
+                    # Merge source chunks
+                    if 'source_chunks' in result:
+                        if 'source_chunks' not in existing:
+                            existing['source_chunks'] = []
+                        existing['source_chunks'].extend(result['source_chunks'])
+
+                    # Merge relationships
+                    if 'relationships' in result:
+                        if 'relationships' not in existing:
+                            existing['relationships'] = []
+                        existing['relationships'].extend(result['relationships'])
+
+                    # Merge linked entities
+                    if 'linked_entities' in result:
+                        if 'linked_entities' not in existing:
+                            existing['linked_entities'] = []
+                        existing['linked_entities'].extend(result['linked_entities'])
+
+                # Accumulate combined score
+                scores[entity_id]['combined_score'] += combined_score
+                scores[entity_id]['sources'].add(result.get('source', 'unknown'))
+
+        # Sort by combined score
         sorted_results = sorted(
             scores.values(),
-            key=lambda x: x['rrf_score'],
+            key=lambda x: x['combined_score'],
             reverse=True
         )
 
-        # Return results with RRF scores
+        # Return results with fusion metadata
         return [
-            {**item['result'], 'rrf_score': item['rrf_score'], 'fusion_sources': item['sources']}
+            {
+                **item['result'],
+                'rrf_score': item['combined_score'],  # Keep name for compatibility
+                'fusion_sources': list(item['sources'])  # Convert set back to list
+            }
             for item in sorted_results
         ]
 
@@ -459,7 +510,7 @@ class SearchMixin:
             return []
 
         try:
-            query_embedding = self.generate_embedding(query)
+            query_embedding = self._get_or_generate_embedding(query)
 
             with self.driver.session(database=self.database) as session:
                 # Search Entity nodes with embeddings and retrieve source chunks
@@ -484,14 +535,15 @@ class SearchMixin:
                          word_count: chunk.word_count
                      }) as source_chunks
 
-                // Get relationships to other entities
+                // Get relationships to other entities with SPG edge properties
                 OPTIONAL MATCH (e)-[r]-(related:Entity)
                 WITH e, similarity, source_chunks,
                      collect(DISTINCT {
                          relation: type(r),
                          node: related.name,
                          official_name: related.official_name,
-                         direction: CASE WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END
+                         direction: CASE WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END,
+                         properties: properties(r)
                      }) as relationships
 
                 RETURN e.name as name,
@@ -613,7 +665,8 @@ class SearchMixin:
                      collect({
                          relation: type(r),
                          node: related.name,
-                         direction: CASE WHEN startNode(r) = n THEN 'outgoing' ELSE 'incoming' END
+                         direction: CASE WHEN startNode(r) = n THEN 'outgoing' ELSE 'incoming' END,
+                         properties: properties(r)
                      }) as relationships
                 RETURN n.name as name,
                        n.label as type,
@@ -643,7 +696,7 @@ class SearchMixin:
             print(f"[Hybrid Search] Text search error: {e}")
             return []
 
-    def _entity_search_scored(self, query: str, limit: int = 5) -> list[dict]:
+    def _entity_search_scored(self, query: str, limit: int = 5, threshold: float = 0.4) -> list[dict]:
         """
         Entity-based graph search with neighborhood and source chunk retrieval.
         """
@@ -651,7 +704,7 @@ class SearchMixin:
             return []
 
         try:
-            query_embedding = self.generate_embedding(query)
+            query_embedding = self._get_or_generate_embedding(query)
 
             with self.driver.session(database=self.database) as session:
                 cypher_query = """
@@ -662,7 +715,7 @@ class SearchMixin:
                           dot + e.embeddings[i] * $query_vector[i]) /
                           (sqrt(reduce(sum = 0.0, x IN e.embeddings | sum + x * x)) *
                            sqrt(reduce(sum = 0.0, x IN $query_vector | sum + x * x))) AS similarity
-                WHERE similarity >= 0.5
+                WHERE similarity >= $threshold
                 ORDER BY similarity DESC
                 LIMIT $limit
 
@@ -677,14 +730,15 @@ class SearchMixin:
                          word_count: chunk.word_count
                      })[..5] as source_chunks
 
-                // Get relationships to other entities
+                // Get relationships to other entities with SPG edge properties
                 OPTIONAL MATCH (e)-[r]-(related:Entity)
                 WITH e, similarity, source_chunks,
                      collect(DISTINCT {
                          relation: type(r),
                          node: related.name,
                          official_name: related.official_name,
-                         direction: CASE WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END
+                         direction: CASE WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END,
+                         properties: properties(r)
                      }) as relationships
 
                 RETURN e.name as name,
@@ -701,6 +755,7 @@ class SearchMixin:
                 result = session.run(
                     cypher_query,
                     query_vector=query_embedding,
+                    threshold=threshold,
                     limit=limit
                 )
 
@@ -721,6 +776,50 @@ class SearchMixin:
         except Exception as e:
             print(f"[Hybrid Search] Entity search error: {e}")
             return []
+
+    def _format_property_value(self, key: str, value) -> str:
+        """
+        Format SPG edge property values for display.
+
+        Args:
+            key: Property key name
+            value: Property value
+
+        Returns:
+            Formatted string representation
+        """
+        if value is None:
+            return "N/A"
+
+        # Currency formatting for financial metrics
+        if key in ['revenue', 'profit', 'expenses', 'assets', 'liabilities',
+                   'equity', 'cashFlow', 'marketCap', 'salary']:
+            if isinstance(value, (int, float)):
+                if value >= 1_000_000_000:
+                    return f"${value/1_000_000_000:.2f}B"
+                elif value >= 1_000_000:
+                    return f"${value/1_000_000:.2f}M"
+                elif value >= 1_000:
+                    return f"${value/1_000:.2f}K"
+                else:
+                    return f"${value:,.2f}"
+
+        # Percentage formatting
+        if key in ['ownershipPercent', 'profitMargin', 'revenuePercent']:
+            if isinstance(value, (int, float)):
+                return f"{value}%"
+
+        # Ratio formatting
+        if key in ['debtToEquity', 'peRatio']:
+            if isinstance(value, (int, float)):
+                return f"{value:.2f}"
+
+        # Date formatting (keep as-is)
+        if 'date' in key.lower() or 'Date' in key:
+            return str(value)
+
+        # Default: stringify
+        return str(value)
 
     def _format_hybrid_results(self, fused_results: list[dict]) -> str:
         """
@@ -793,7 +892,7 @@ class SearchMixin:
                             page_num = chunk.get('page_number', '?')
                             entity_desc += f"\n    [Chunk {chunk_idx}, Page {page_num}]: \"{chunk['content']}\""
 
-                # Add relationships
+                # Add relationships with SPG edge properties
                 if relationships:
                     entity_desc += "\n  - Related Entities:"
                     # Show up to 5 most important relationships
@@ -806,67 +905,96 @@ class SearchMixin:
                                 rel_node = f"{rel_node} ({official})"
                             entity_desc += f"\n    • {direction} {rel.get('relation', 'UNKNOWN')}: {rel_node}"
 
+                            # Display edge properties (SPG data) - SHOW ALL for LLM
+                            props = rel.get('properties', {})
+                            if props and isinstance(props, dict):
+                                # Filter out None and empty values
+                                valid_props = [(k, v) for k, v in props.items()
+                                             if v is not None and v != ""]
+
+                                if valid_props:
+                                    entity_desc += f"\n      Properties:"
+                                    # Show ALL properties (no limit) so LLM has complete data
+                                    for key, value in valid_props:
+                                        formatted_value = self._format_property_value(key, value)
+                                        entity_desc += f"\n        • {key}: {formatted_value}"
+
             context_parts.append(entity_desc)
 
         return "\n".join(context_parts)
 
     def hybrid_search(self, query: str, limit: int = 5, enable_vector: bool = True,
                      enable_text: bool = True, enable_entity: bool = True,
-                     enable_chunk: bool = True) -> str:
+                     enable_chunk: bool = True, vector_threshold: float = 0.4,
+                     entity_threshold: float = 0.4, rrf_k: int = 60,
+                     limit_multiplier: int = 2) -> str:
         """
         Hybrid search combining multiple retrieval strategies with Reciprocal Rank Fusion.
+
+        Args:
+            query: Search query text
+            limit: Maximum number of final results to return
+            enable_vector: Enable vector similarity search on entities
+            enable_text: Enable text-based search on entities
+            enable_entity: Enable entity graph search with neighborhoods
+            enable_chunk: Enable direct text search on chunks
+            vector_threshold: Similarity threshold for vector search (default: 0.4)
+            entity_threshold: Similarity threshold for entity search (default: 0.4)
+            rrf_k: RRF parameter k for rank fusion (default: 60)
+            limit_multiplier: Multiplier for intermediate results before fusion (default: 2)
         """
         print(f"\n[Hybrid Search] Query: {query[:60]}...")
         print(f"[Hybrid Search] Strategies: Vector={enable_vector}, Text={enable_text}, Entity={enable_entity}, Chunk={enable_chunk}")
 
         result_lists = []
 
-        # Strategy 1: Vector similarity search on Entity nodes
-        if enable_vector and self.embedding_model:
-            print("[Hybrid Search] Running vector similarity search on Entities...")
-            vector_results = self._vector_search_scored(query, limit=limit*2, threshold=0.4)
-            if vector_results:
-                result_lists.append(vector_results)
-                print(f"  ✓ Found {len(vector_results)} entity results")
-            else:
-                print(f"  ✗ No entity vector results")
+        # Execute strategies in parallel for better performance
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {}
 
-        # Strategy 2: Direct chunk text search
-        if enable_chunk:
-            print("[Hybrid Search] Running direct text search on Chunks...")
-            chunk_results = self._chunk_text_search_scored(query, limit=limit*2)
-            if chunk_results:
-                result_lists.append(chunk_results)
-                print(f"  ✓ Found {len(chunk_results)} chunk results")
-            else:
-                print(f"  ✗ No chunk text results")
+            # Submit enabled strategies for parallel execution
+            if enable_vector and self.embedding_model:
+                print("[Hybrid Search] Submitting vector similarity search on Entities...")
+                futures['vector'] = executor.submit(
+                    self._vector_search_scored, query, limit*limit_multiplier, vector_threshold
+                )
 
-        # Strategy 3: Text-based search on Entity names/descriptions
-        if enable_text:
-            print("[Hybrid Search] Running text-based search on Entities...")
-            text_results = self._text_search_scored(query, limit=limit*2)
-            if text_results:
-                result_lists.append(text_results)
-                print(f"  ✓ Found {len(text_results)} entity text results")
-            else:
-                print(f"  ✗ No entity text results")
+            if enable_chunk:
+                print("[Hybrid Search] Submitting direct text search on Chunks...")
+                futures['chunk'] = executor.submit(
+                    self._chunk_text_search_scored, query, limit*limit_multiplier
+                )
 
-        # Strategy 4: Entity graph search with neighborhoods
-        if enable_entity and self.embedding_model:
-            print("[Hybrid Search] Running entity graph search...")
-            entity_results = self._entity_search_scored(query, limit=limit)
-            if entity_results:
-                result_lists.append(entity_results)
-                print(f"  ✓ Found {len(entity_results)} entity graph results")
-            else:
-                print(f"  ✗ No entity graph results")
+            if enable_text:
+                print("[Hybrid Search] Submitting text-based search on Entities...")
+                futures['text'] = executor.submit(
+                    self._text_search_scored, query, limit*limit_multiplier
+                )
+
+            if enable_entity and self.embedding_model:
+                print("[Hybrid Search] Submitting entity graph search...")
+                futures['entity'] = executor.submit(
+                    self._entity_search_scored, query, limit*limit_multiplier, entity_threshold
+                )
+
+            # Collect results as they complete
+            for name, future in futures.items():
+                try:
+                    result = future.result(timeout=30)  # 30 second timeout per strategy
+                    if result:
+                        result_lists.append(result)
+                        print(f"  ✓ {name.capitalize()} search found {len(result)} results")
+                    else:
+                        print(f"  ✗ No {name} results")
+                except Exception as e:
+                    print(f"  ✗ {name.capitalize()} search failed: {e}")
 
         if not result_lists:
             return f"No results found for query: {query}"
 
         # Apply Reciprocal Rank Fusion
         print(f"[Hybrid Search] Fusing results from {len(result_lists)} strategies using RRF...")
-        fused_results = self._reciprocal_rank_fusion(result_lists, k=60)
+        fused_results = self._reciprocal_rank_fusion(result_lists, k=rrf_k)
 
         print(f"[Hybrid Search] Fused {len(fused_results)} unique results")
         print(f"[Hybrid Search] Returning top {limit} results\n")
