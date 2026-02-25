@@ -12,6 +12,8 @@ import logging
 import os
 from enum import Enum
 
+from .retry import retry_with_backoff, async_retry_with_backoff
+
 # LangSmith tracing imports
 try:
     from langsmith import traceable, trace
@@ -349,24 +351,28 @@ class OpenAIClient(LLMClient):
         """Send chat completion request to OpenAI."""
         prepared_messages = self._prepare_messages(messages)
 
+        # Build API parameters, filtering out None values
+        api_params = {
+            "model": self.model,
+            "messages": prepared_messages,
+            "temperature": temperature,
+            **kwargs
+        }
+
+        # Only add max_tokens if it's not None
+        if max_tokens is not None:
+            # Handle GPT-5 model parameter name
+            if self.model and ('gpt-5' in self.model.lower() or 'gpt-4o' in self.model.lower()):
+                api_params["max_completion_tokens"] = max_tokens
+            else:
+                api_params["max_tokens"] = max_tokens
+
+        @retry_with_backoff(max_attempts=3, base_delay=2.0, max_delay=30.0)
+        def _call_api():
+            return self.client.chat.completions.create(**api_params)
+
         try:
-            # Build API parameters, filtering out None values
-            api_params = {
-                "model": self.model,
-                "messages": prepared_messages,
-                "temperature": temperature,
-                **kwargs
-            }
-
-            # Only add max_tokens if it's not None
-            if max_tokens is not None:
-                # Handle GPT-5 model parameter name
-                if self.model and ('gpt-5' in self.model.lower() or 'gpt-4o' in self.model.lower()):
-                    api_params["max_completion_tokens"] = max_tokens
-                else:
-                    api_params["max_tokens"] = max_tokens
-
-            response = self.client.chat.completions.create(**api_params)
+            response = _call_api()
 
             llm_response = LLMResponse(
                 content=response.choices[0].message.content,
@@ -409,24 +415,28 @@ class OpenAIClient(LLMClient):
         """Send async chat completion request to OpenAI."""
         prepared_messages = self._prepare_messages(messages)
 
+        # Build API parameters, filtering out None values
+        api_params = {
+            "model": self.model,
+            "messages": prepared_messages,
+            "temperature": temperature,
+            **kwargs
+        }
+
+        # Only add max_tokens if it's not None
+        if max_tokens is not None:
+            # Handle GPT-5 model parameter name
+            if self.model and ('gpt-5' in self.model.lower() or 'gpt-4o' in self.model.lower()):
+                api_params["max_completion_tokens"] = max_tokens
+            else:
+                api_params["max_tokens"] = max_tokens
+
+        @async_retry_with_backoff(max_attempts=3, base_delay=2.0, max_delay=30.0)
+        async def _call_api():
+            return await self.async_client.chat.completions.create(**api_params)
+
         try:
-            # Build API parameters, filtering out None values
-            api_params = {
-                "model": self.model,
-                "messages": prepared_messages,
-                "temperature": temperature,
-                **kwargs
-            }
-
-            # Only add max_tokens if it's not None
-            if max_tokens is not None:
-                # Handle GPT-5 model parameter name
-                if self.model and ('gpt-5' in self.model.lower() or 'gpt-4o' in self.model.lower()):
-                    api_params["max_completion_tokens"] = max_tokens
-                else:
-                    api_params["max_tokens"] = max_tokens
-
-            response = await self.async_client.chat.completions.create(**api_params)
+            response = await _call_api()
 
             llm_response = LLMResponse(
                 content=response.choices[0].message.content,
@@ -492,12 +502,16 @@ class OllamaClient(LLMClient):
         """Send chat request to Ollama."""
         prepared_messages = self._prepare_messages(messages)
 
-        try:
-            response = self.client.chat(
+        @retry_with_backoff(max_attempts=3, base_delay=2.0, max_delay=30.0)
+        def _call_api():
+            return self.client.chat(
                 model=self.model,
                 messages=prepared_messages,
                 **kwargs
             )
+
+        try:
+            response = _call_api()
 
             llm_response = LLMResponse(
                 content=response['message']['content'],

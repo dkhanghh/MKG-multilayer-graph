@@ -1,0 +1,435 @@
+namespace: Finance
+
+entities:
+  # ===========================================================================
+  # SOURCE LAYER
+  # ===========================================================================
+
+  Chunk:
+    entity_type: EntityType
+    properties:
+      - name: content
+        type: Text
+        index: TextAndVector
+      - name: chunkIndex
+        type: Integer
+      - name: pageNumber
+        type: Integer
+    relations: []
+
+  # ===========================================================================
+  # CONCEPT TAXONOMIES
+  # ===========================================================================
+
+  Industry:
+    entity_type: ConceptType
+    hypernym_predicate: isA
+    properties: []
+    relations:
+      - name: belongTo
+        target_entity: Industry
+        edge_properties:
+          - name: hierarchyLevel
+            type: Integer
+
+  ExecutiveRole:
+    entity_type: ConceptType
+    hypernym_predicate: isA
+    properties: []
+    relations:
+      - name: belongTo
+        target_entity: ExecutiveRole
+        edge_properties:
+          - name: hierarchyLevel
+            type: Integer
+
+  ProductCategory:
+    entity_type: ConceptType
+    hypernym_predicate: isA
+    properties: []
+    relations:
+      - name: belongTo
+        target_entity: ProductCategory
+        edge_properties:
+          - name: hierarchyLevel
+            type: Integer
+
+  RegionType:
+    entity_type: ConceptType
+    hypernym_predicate: isA
+    properties: []
+    relations:
+      - name: belongTo
+        target_entity: RegionType
+        edge_properties:
+          - name: hierarchyLevel
+            type: Integer
+
+  EventCategory:
+    entity_type: ConceptType
+    hypernym_predicate: isA
+    properties: []
+    relations:
+      - name: belongTo
+        target_entity: EventCategory
+        edge_properties:
+          - name: hierarchyLevel
+            type: Integer
+
+  # ===========================================================================
+  # CORE ENTITIES
+  # ===========================================================================
+
+  Company:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: ticker
+        type: Text
+        index: Text
+      - name: foundedYear
+        type: Integer
+      - name: marketCap
+        type: Float
+      - name: employeeCount
+        type: Integer
+      - name: industry
+        type: Industry
+        constraint: MultiValue
+    relations:
+      - name: OWNS
+        target_entity: Company
+        edge_properties:
+          - name: ownershipPercent
+            type: Float
+          - name: acquiredDate
+            type: Text
+          - name: isSubsidiary
+            type: Boolean
+      - name: COMPETES_WITH
+        target_entity: Company
+        edge_properties:
+          - name: marketOverlap
+            type: Text
+          - name: intensity
+            type: Text
+      - name: REPORTED_FINANCIALS
+        target_entity: FinancialStatement
+        edge_properties:
+          - name: period
+            type: Text
+          - name: periodStart
+            type: Text
+          - name: periodEnd
+            type: Text
+          - name: revenue
+            type: Float
+          - name: revenueCurrency
+            type: Text
+          - name: profit
+            type: Float
+          - name: profitType
+            type: Text
+          - name: expenses
+            type: Float
+          - name: assets
+            type: Float
+          - name: liabilities
+            type: Float
+          - name: equity
+            type: Float
+          - name: cashFlow
+            type: Float
+          - name: debtToEquity
+            type: Float
+          - name: profitMargin
+            type: Float
+          - name: confidence
+            type: Float
+          - name: sourceChunks
+            type: "List[Text]"
+      - name: EMPLOYS
+        target_entity: Executive
+        edge_properties:
+          - name: hireDate
+            type: Text
+          - name: salary
+            type: Float
+          - name: isCurrentEmployee
+            type: Boolean
+      - name: PRODUCES
+        target_entity: Product
+        edge_properties:
+          - name: launchDate
+            type: Text
+          - name: discontinuedDate
+            type: Text
+          - name: marketShare
+            type: Float
+      - name: OPERATES_IN
+        target_entity: GeographicRegion
+        edge_properties:
+          - name: since
+            type: Text
+          - name: revenuePercent
+            type: Float
+          - name: employeeCount
+            type: Integer
+      - name: HAS_SEGMENT
+        target_entity: BusinessSegment
+        edge_properties:
+          - name: segmentRevenue
+            type: Float
+          - name: segmentProfit
+            type: Float
+          - name: segmentGrowthRate
+            type: Float
+      - name: FILED
+        target_entity: RegulatoryFiling
+        edge_properties:
+          - name: filingDate
+            type: Text
+          - name: filingType
+            type: Text
+          - name: status
+            type: Text
+      - name: INVOLVED_IN
+        target_entity: FinancialEvent
+        edge_properties:
+          - name: eventDate
+            type: Text
+          - name: role
+            type: Text
+          - name: impact
+            type: Text
+      - name: HAS_MARKET_DATA
+        target_entity: MarketData
+        edge_properties:
+          - name: recordedDate
+            type: Text
+          - name: stockPrice
+            type: Float
+          - name: volume
+            type: Integer
+          - name: marketCap
+            type: Float
+          - name: peRatio
+            type: Float
+          - name: dividend
+            type: Float
+
+  Executive:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: fullName
+        type: Text
+        index: Text
+      - name: position
+        type: Text
+        index: Text
+      - name: role
+        type: ExecutiveRole
+      - name: startDate
+        type: Text
+      - name: endDate
+        type: Text
+      - name: age
+        type: Integer
+    relations:
+      - name: WORKS_FOR
+        target_entity: Company
+        edge_properties: []
+      - name: LEADS
+        target_entity: BusinessSegment
+        edge_properties:
+          - name: since
+            type: Text
+          - name: performance
+            type: Text
+
+  Product:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: productName
+        type: Text
+        index: Text
+      - name: category
+        type: ProductCategory
+      - name: launchDate
+        type: Text
+      - name: version
+        type: Text
+    relations:
+      - name: PRODUCED_BY
+        target_entity: Company
+        edge_properties: []
+      - name: PART_OF
+        target_entity: BusinessSegment
+        edge_properties:
+          - name: contributionPercent
+            type: Float
+
+  BusinessSegment:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: segmentName
+        type: Text
+        index: Text
+      - name: segmentType
+        type: Text
+    relations:
+      - name: BELONGS_TO
+        target_entity: Company
+        edge_properties: []
+      - name: INCLUDES
+        target_entity: Product
+        edge_properties: []
+
+  GeographicRegion:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: regionName
+        type: Text
+        index: Text
+      - name: regionType
+        type: RegionType
+      - name: country
+        type: Text
+      - name: continent
+        type: Text
+      - name: population
+        type: Integer
+    relations:
+      - name: CONTAINS
+        target_entity: Company
+        edge_properties: []
+
+  # ===========================================================================
+  # EVENT & FILING ENTITIES
+  # ===========================================================================
+
+  FinancialStatement:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: statementName
+        type: Text
+        index: Text
+      - name: statementType
+        type: Text
+      - name: fiscalYear
+        type: Text
+      - name: fiscalPeriod
+        type: Text
+      - name: reportingDate
+        type: Text
+    relations:
+      - name: REPORTED_BY
+        target_entity: Company
+        edge_properties: []
+      - name: PART_OF
+        target_entity: RegulatoryFiling
+        edge_properties:
+          - name: pageNumber
+            type: Integer
+          - name: sectionName
+            type: Text
+
+  FinancialEvent:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: eventName
+        type: Text
+        index: Text
+      - name: eventDate
+        type: Text
+        index: Text
+      - name: category
+        type: EventCategory
+      - name: eventType
+        type: Text
+      - name: severity
+        type: Text
+    relations:
+      - name: INVOLVES
+        target_entity: Company
+        edge_properties: []
+      - name: AFFECTS
+        target_entity: Company
+        edge_properties:
+          - name: impactType
+            type: Text
+          - name: impactMagnitude
+            type: Float
+
+  RegulatoryFiling:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: filingName
+        type: Text
+        index: Text
+      - name: filingType
+        type: Text
+      - name: filingDate
+        type: Text
+      - name: fiscalPeriod
+        type: Text
+      - name: documentUrl
+        type: Text
+    relations:
+      - name: FILED_BY
+        target_entity: Company
+        edge_properties: []
+      - name: COVERS_PERIOD
+        target_entity: Text
+        edge_properties:
+          - name: periodStart
+            type: Text
+          - name: periodEnd
+            type: Text
+
+  # Note: MarketData is referenced as a relation target from Company.HAS_MARKET_DATA
+  # but was not defined as a standalone entity in the original DSL.
+  # Adding it here so relation target validation passes.
+  MarketData:
+    entity_type: EntityType
+    properties:
+      - name: desc
+        type: Text
+        index: Text
+      - name: recordedDate
+        type: Text
+        index: Text
+      - name: stockPrice
+        type: Float
+      - name: volume
+        type: Integer
+      - name: marketCap
+        type: Float
+      - name: peRatio
+        type: Float
+      - name: dividend
+        type: Float
+    relations: []

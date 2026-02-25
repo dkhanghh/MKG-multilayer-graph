@@ -15,6 +15,7 @@ from server.core.config import load_config
 from server.core.tracing import traceable
 from server.utils.helpers import convert_metrics_to_dict, add_tracing_metadata
 
+from knowledge_graphs.models.pipeline_state import PipelineStateManager
 from knowledge_graphs.pipeline.langgraph_executor import PipelineWorkflow
 from knowledge_graphs.pipeline.batch_processor import process_directory_in_batches
 from knowledge_graphs.pipeline.csv_batch_processor import process_csv_in_batches
@@ -174,3 +175,29 @@ async def upload_and_run_pipeline(file: UploadFile = File(...), config: Optional
     except Exception as exc:
         logger.exception("Upload-and-run failed")
         raise APIError(detail="Upload and run pipeline failed")
+
+
+@router.post("/resume/{pipeline_id}", response_model=PipelineResponse)
+async def resume_pipeline(pipeline_id: str):
+    """Resume a pipeline from its last checkpoint."""
+    try:
+        config = load_config()
+        workflow = PipelineWorkflow(config=config)
+        results = workflow.resume_pipeline(pipeline_id)
+        return _build_response(results)
+    except ValueError as exc:
+        raise ValidationError(detail=str(exc))
+    except Exception as exc:
+        logger.exception("Pipeline resume failed")
+        raise APIError(detail="Pipeline resume failed")
+
+
+@router.get("/checkpoints")
+async def list_checkpoints():
+    """List available pipeline checkpoints."""
+    try:
+        checkpoints = PipelineStateManager.list_checkpoints()
+        return {"checkpoints": checkpoints}
+    except Exception as exc:
+        logger.exception("Failed to list checkpoints")
+        raise APIError(detail="Failed to list checkpoints")

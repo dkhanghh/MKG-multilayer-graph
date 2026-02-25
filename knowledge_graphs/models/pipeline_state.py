@@ -108,6 +108,10 @@ class PipelineState(TypedDict, total=False):
     errors: List[str]  # List of error messages
     warnings: List[str]  # List of warning messages
     
+    # Checkpoint/resume support
+    last_completed_component: Optional[str]  # Name of last successfully completed component
+    checkpoint_dir: Optional[str]  # Directory for checkpoint storage
+
     # Additional metadata
     metadata: Dict[str, Any]  # Additional pipeline metadata
 
@@ -400,5 +404,95 @@ class PipelineStateManager:
                 state[key] = PipelineMetrics(**value)
             else:
                 state[key] = value
-        
+
         return state
+
+    @staticmethod
+    def save_checkpoint(state: PipelineState, checkpoint_dir: str = "./checkpoints") -> str:
+        """
+        Save pipeline state checkpoint to disk.
+
+        Args:
+            state: Pipeline state to save
+            checkpoint_dir: Directory to store checkpoints
+
+        Returns:
+            Path to saved checkpoint file
+        """
+        import os
+
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        pipeline_id = state.get("pipeline_id", "unknown")
+        component = state.get("last_completed_component", "unknown")
+        filename = f"{pipeline_id}_{component}.json"
+        filepath = os.path.join(checkpoint_dir, filename)
+
+        # Also save a "latest" pointer
+        latest_path = os.path.join(checkpoint_dir, f"{pipeline_id}_latest.json")
+
+        serialized = PipelineStateManager.serialize_state(state)
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(serialized)
+        with open(latest_path, "w", encoding="utf-8") as f:
+            f.write(serialized)
+
+        return filepath
+
+    @staticmethod
+    def load_checkpoint(
+        pipeline_id: str, checkpoint_dir: str = "./checkpoints"
+    ) -> Optional[PipelineState]:
+        """
+        Load the latest checkpoint for a pipeline.
+
+        Args:
+            pipeline_id: Pipeline ID to load
+            checkpoint_dir: Directory containing checkpoints
+
+        Returns:
+            Pipeline state from checkpoint, or None if not found
+        """
+        import os
+
+        latest_path = os.path.join(checkpoint_dir, f"{pipeline_id}_latest.json")
+
+        if not os.path.exists(latest_path):
+            return None
+
+        with open(latest_path, "r", encoding="utf-8") as f:
+            return PipelineStateManager.deserialize_state(f.read())
+
+    @staticmethod
+    def list_checkpoints(checkpoint_dir: str = "./checkpoints") -> List[Dict[str, Any]]:
+        """
+        List available checkpoints.
+
+        Returns:
+            List of checkpoint info dicts with pipeline_id, component, timestamp, path
+        """
+        import os
+        import glob
+
+        checkpoints = []
+        if not os.path.exists(checkpoint_dir):
+            return checkpoints
+
+        for filepath in glob.glob(os.path.join(checkpoint_dir, "*_latest.json")):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    state = PipelineStateManager.deserialize_state(f.read())
+                checkpoints.append(
+                    {
+                        "pipeline_id": state.get("pipeline_id"),
+                        "last_completed_component": state.get("last_completed_component"),
+                        "status": state.get("status"),
+                        "created_at": str(state.get("created_at", "")),
+                        "path": filepath,
+                    }
+                )
+            except Exception:
+                continue
+
+        return checkpoints

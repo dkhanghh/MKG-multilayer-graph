@@ -3,10 +3,36 @@
 Pipeline-specific defaults live here. For application-wide settings
 (credentials, ports, etc.) see ``server.core.settings``.
 """
-from typing import Any, Dict
 import os
+import re
+from typing import Any, Dict
 
 from server.core.settings import get_settings
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def resolve_env_vars(config: Any) -> Any:
+    """
+    Recursively resolve ${VAR} patterns in config values with environment variables.
+
+    Supports:
+    - Full replacement: "${VAR}" -> os.environ["VAR"]
+    - Partial replacement: "prefix_${VAR}_suffix" -> "prefix_value_suffix"
+    - Missing vars: keeps original ${VAR} if not set
+    """
+    if isinstance(config, str):
+
+        def _replace(match):
+            var_name = match.group(1)
+            return os.environ.get(var_name, match.group(0))
+
+        return _ENV_VAR_PATTERN.sub(_replace, config)
+    elif isinstance(config, dict):
+        return {k: resolve_env_vars(v) for k, v in config.items()}
+    elif isinstance(config, list):
+        return [resolve_env_vars(item) for item in config]
+    return config
 
 
 def _build_default_config() -> Dict[str, Any]:
@@ -129,4 +155,4 @@ def load_config(config_path: str = None) -> Dict[str, Any]:
     with open(config_file, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    return config
+    return resolve_env_vars(config)

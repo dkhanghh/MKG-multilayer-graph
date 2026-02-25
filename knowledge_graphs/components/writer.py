@@ -9,7 +9,7 @@ import json
 import csv
 import os
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import datetime
 
@@ -17,14 +17,21 @@ from .base import Writer
 from ..models.graph import SubGraph, Node, Edge
 from ..models.pipeline_state import PipelineState
 from ..utils.registry import register_component
+from ..utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
 # Optional imports for database connectivity
 try:
     from neo4j import GraphDatabase
+    from neo4j.exceptions import ServiceUnavailable, AuthError, TransientError, SessionExpired
+
+    NEO4J_FATAL_ERRORS = (ServiceUnavailable, AuthError)
+    NEO4J_TRANSIENT_ERRORS = (ServiceUnavailable, TransientError, SessionExpired)
     HAS_NEO4J = True
 except ImportError:
+    NEO4J_FATAL_ERRORS = ()
+    NEO4J_TRANSIENT_ERRORS = ()
     HAS_NEO4J = False
 
 
@@ -576,7 +583,35 @@ class Neo4jWriter(Writer):
         except Exception as e:
             logger.error(f"Failed to connect to Neo4j: {e}")
             raise
-    
+
+    @staticmethod
+    def _run_with_retry(session, cypher: str, **kwargs):
+        """
+        Execute a Cypher query with retry for transient Neo4j errors.
+
+        Args:
+            session: Neo4j session
+            cypher: Cypher query string
+            **kwargs: Parameters to pass to session.run()
+
+        Returns:
+            Result of session.run()
+        """
+        if NEO4J_TRANSIENT_ERRORS:
+
+            @retry_with_backoff(
+                max_attempts=3,
+                base_delay=1.0,
+                max_delay=30.0,
+                retryable_exceptions=NEO4J_TRANSIENT_ERRORS,
+            )
+            def _execute():
+                return session.run(cypher, **kwargs)
+
+            return _execute()
+        else:
+            return session.run(cypher, **kwargs)
+
     def process(self, state: PipelineState) -> PipelineState:
         """
         Write knowledge graph to Neo4j database.
@@ -606,44 +641,74 @@ class Neo4jWriter(Writer):
         chunks = state.get("split_chunks", state.get("chunks", []))
         chunk_map = {chunk.id: chunk for chunk in chunks} if chunks else {}
 
+        # Track per-operation failures
+        write_failures: List[Dict[str, Any]] = []
+
         try:
             with self.driver.session(database=database) as session:
                 # Clear database if requested
                 if clear_database:
-                    session.run("MATCH (n) DETACH DELETE n")
+                    self._run_with_retry(session, "MATCH (n) DETACH DELETE n")
                     logger.info("Cleared Neo4j database")
 
                 # Write chunk nodes first
-                chunks_written = self._write_chunks_to_neo4j(
+                chunks_written, chunk_failures = self._write_chunks_to_neo4j(
                     session, chunk_map, batch_size
                 )
+                write_failures.extend(chunk_failures)
 
                 # Write entity nodes in batches
-                nodes_written = self._write_nodes_to_neo4j(
+                nodes_written, node_failures = self._write_nodes_to_neo4j(
                     session, merged_graph.nodes, batch_size
                 )
+                write_failures.extend(node_failures)
 
                 # Write edges in batches
-                edges_written = self._write_edges_to_neo4j(
+                edges_written, edge_failures = self._write_edges_to_neo4j(
                     session, merged_graph.edges, batch_size
                 )
+                write_failures.extend(edge_failures)
 
                 # Create source relationships from chunks to entities
                 source_rels_written = self._write_chunk_source_relationships(
                     session, merged_graph.nodes, batch_size
                 )
 
-                logger.info(f"Wrote {chunks_written} chunks, {nodes_written} nodes, {edges_written} edges, and {source_rels_written} source relationships to Neo4j")
+                logger.info(
+                    f"Wrote {chunks_written} chunks, {nodes_written} nodes, "
+                    f"{edges_written} edges, and {source_rels_written} source "
+                    f"relationships to Neo4j"
+                )
 
-            output_path = f"neo4j://{self.get_config_value('username')}@{self.get_config_value('uri').split('//')[-1]}/{database}"
+                if write_failures:
+                    logger.warning(
+                        f"Encountered {len(write_failures)} write failures during Neo4j ingestion"
+                    )
+
+            output_path = (
+                f"neo4j://{self.get_config_value('username')}@"
+                f"{self.get_config_value('uri').split('//')[-1]}/{database}"
+            )
+
+        except NEO4J_FATAL_ERRORS as e:
+            logger.error(f"Fatal Neo4j connection error: {e}")
+            raise  # Unrecoverable -- let the pipeline know
 
         except Exception as e:
             logger.error(f"Error writing to Neo4j: {e}")
             output_path = ""
+            write_failures.append({"operation": "session", "error": str(e)})
 
         # Update state
         updated_state = state.copy()
         updated_state["output_path"] = output_path
+
+        # Store write failures in metadata
+        if write_failures:
+            metadata = dict(updated_state.get("metadata", {}) or {})
+            metadata["write_failures"] = write_failures
+            metadata["write_failure_count"] = len(write_failures)
+            updated_state["metadata"] = metadata
 
         return updated_state
 
@@ -661,7 +726,9 @@ class Neo4jWriter(Writer):
 
         return merged
 
-    def _write_chunks_to_neo4j(self, session, chunk_map: Dict[str, Any], batch_size: int) -> int:
+    def _write_chunks_to_neo4j(
+        self, session, chunk_map: Dict[str, Any], batch_size: int
+    ) -> Tuple[int, List[Dict[str, Any]]]:
         """
         Write Chunk nodes to Neo4j in batches.
 
@@ -671,50 +738,66 @@ class Neo4jWriter(Writer):
             batch_size: Batch size
 
         Returns:
-            Number of chunks written
+            Tuple of (number of chunks written, list of failure records)
         """
         if not chunk_map:
             logger.info("No chunks to write")
-            return 0
+            return 0, []
 
         chunks_written = 0
+        failures: List[Dict[str, Any]] = []
         chunk_list = list(chunk_map.values())
 
         for i in range(0, len(chunk_list), batch_size):
             batch = chunk_list[i:i + batch_size]
+            batch_index = i // batch_size
 
-            # Prepare chunk data for batch
-            chunk_data = []
-            for chunk in batch:
-                chunk_dict = {
-                    "id": chunk.id,
-                    "content": chunk.content,
-                    "chunk_type": chunk.chunk_type.value if hasattr(chunk.chunk_type, 'value') else str(chunk.chunk_type),
-                    "length": chunk.length,
-                    "word_count": chunk.word_count
-                }
+            try:
+                # Prepare chunk data for batch
+                chunk_data = []
+                for chunk in batch:
+                    chunk_dict = {
+                        "id": chunk.id,
+                        "content": chunk.content,
+                        "chunk_type": (
+                            chunk.chunk_type.value
+                            if hasattr(chunk.chunk_type, "value")
+                            else str(chunk.chunk_type)
+                        ),
+                        "length": chunk.length,
+                        "word_count": chunk.word_count,
+                    }
 
-                # Add optional fields
-                if chunk.page_number is not None:
-                    chunk_dict["page_number"] = chunk.page_number
-                if chunk.chunk_index is not None:
-                    chunk_dict["chunk_index"] = chunk.chunk_index
-                if chunk.language:
-                    chunk_dict["language"] = chunk.language
+                    # Add optional fields
+                    if chunk.page_number is not None:
+                        chunk_dict["page_number"] = chunk.page_number
+                    if chunk.chunk_index is not None:
+                        chunk_dict["chunk_index"] = chunk.chunk_index
+                    if chunk.language:
+                        chunk_dict["language"] = chunk.language
 
-                chunk_data.append(chunk_dict)
+                    chunk_data.append(chunk_dict)
 
-            # Create Chunk nodes in Neo4j
-            cypher = """
-            UNWIND $chunks as chunkData
-            MERGE (c:Chunk {id: chunkData.id})
-            SET c += chunkData
-            """
+                # Create Chunk nodes in Neo4j
+                cypher = """
+                UNWIND $chunks as chunkData
+                MERGE (c:Chunk {id: chunkData.id})
+                SET c += chunkData
+                """
 
-            session.run(cypher, chunks=chunk_data)
-            chunks_written += len(batch)
+                self._run_with_retry(session, cypher, chunks=chunk_data)
+                chunks_written += len(batch)
 
-        return chunks_written
+            except Exception as e:
+                logger.warning(f"Failed to write chunk batch {batch_index}: {e}")
+                failures.append({
+                    "operation": "write_chunks",
+                    "batch_index": batch_index,
+                    "batch_size": len(batch),
+                    "error": str(e),
+                })
+
+        return chunks_written, failures
 
     def _write_chunk_source_relationships(self, session, nodes: List[Node], batch_size: int) -> int:
         """
@@ -755,35 +838,38 @@ class Neo4jWriter(Writer):
             MERGE (c)-[r:SOURCE]->(e)
             """
 
-            session.run(cypher, pairs=batch)
+            self._run_with_retry(session, cypher, pairs=batch)
             relationships_written += len(batch)
 
         return relationships_written
 
-    def _write_nodes_to_neo4j(self, session, nodes: List[Node], batch_size: int) -> int:
+    def _write_nodes_to_neo4j(
+        self, session, nodes: List[Node], batch_size: int
+    ) -> Tuple[int, List[Dict[str, Any]]]:
         """
         Write nodes to Neo4j in batches.
-        
+
         Args:
             session: Neo4j session
             nodes: List of nodes to write
             batch_size: Batch size
-            
+
         Returns:
-            Number of nodes written
+            Tuple of (number of nodes written, list of failure records)
         """
         nodes_written = 0
-        
+        failures: List[Dict[str, Any]] = []
+
         for i in range(0, len(nodes), batch_size):
             batch = nodes[i:i + batch_size]
-            
+
             # Prepare node data for batch
             node_data = []
             for node in batch:
                 node_dict = {
                     "id": node.id,
                     "name": node.name,
-                    "label": node.label
+                    "label": node.label,
                 }
 
                 # Add properties
@@ -793,7 +879,9 @@ class Neo4jWriter(Writer):
                     for key, value in node.properties.items():
                         if isinstance(value, (str, int, float, bool)):
                             simple_props[key] = value
-                        elif isinstance(value, list) and all(isinstance(v, (str, int, float, bool)) for v in value):
+                        elif isinstance(value, list) and all(
+                            isinstance(v, (str, int, float, bool)) for v in value
+                        ):
                             simple_props[key] = value
                         else:
                             # Convert complex objects to strings
@@ -814,27 +902,40 @@ class Neo4jWriter(Writer):
                     node_dict["embeddings"] = node.embeddings
 
                 node_data.append(node_dict)
-            
+
             # Create nodes in Neo4j with dynamic labels
             # We need to set labels per node since each can have a different category
             for node in node_data:
                 label = node.get("label", "Entity")
                 # Sanitize label to be a valid Neo4j label (alphanumeric and underscore only)
-                sanitized_label = ''.join(c if c.isalnum() or c == '_' else '_' for c in label)
+                sanitized_label = "".join(
+                    c if c.isalnum() or c == "_" else "_" for c in label
+                )
 
-                # Each entity gets two labels: :Entity (base) and category-specific (e.g., :Laboratory)
+                # Each entity gets two labels: :Entity (base) and category-specific
                 cypher = f"""
                 MERGE (n:Entity {{id: $nodeData.id}})
                 SET n += $nodeData
                 SET n:{sanitized_label}
                 """
 
-                session.run(cypher, nodeData=node)
-                nodes_written += 1
-        
-        return nodes_written
+                try:
+                    self._run_with_retry(session, cypher, nodeData=node)
+                    nodes_written += 1
+                except Exception as e:
+                    node_id = node.get("id", "unknown")
+                    logger.warning(f"Failed to write node {node_id}: {e}")
+                    failures.append({
+                        "operation": "write_node",
+                        "node_id": node_id,
+                        "error": str(e),
+                    })
+
+        return nodes_written, failures
     
-    def _write_edges_to_neo4j(self, session, edges: List[Edge], batch_size: int) -> int:
+    def _write_edges_to_neo4j(
+        self, session, edges: List[Edge], batch_size: int
+    ) -> Tuple[int, List[Dict[str, Any]]]:
         """
         Write edges to Neo4j in batches.
 
@@ -849,9 +950,10 @@ class Neo4jWriter(Writer):
             batch_size: Batch size
 
         Returns:
-            Number of edges written
+            Tuple of (number of edges written, list of failure records)
         """
         edges_written = 0
+        failures: List[Dict[str, Any]] = []
 
         # Separate special relationships from regular ones
         isa_edges = []
@@ -884,7 +986,7 @@ class Neo4jWriter(Writer):
                     "source_id": edge.source_id,
                     "target_id": edge.target_id,
                     "relation_type": edge.relation_type,
-                    "directed": edge.directed
+                    "directed": edge.directed,
                 }
 
                 # Add optional properties
@@ -914,7 +1016,8 @@ class Neo4jWriter(Writer):
 
             # Fallback if APOC is not available
             try:
-                session.run(cypher, edges=edge_data)
+                self._run_with_retry(session, cypher, edges=edge_data)
+                edges_written += len(batch)
             except Exception:
                 # Use simpler approach without APOC
                 for edge_dict in edge_data:
@@ -925,17 +1028,30 @@ class Neo4jWriter(Writer):
                     SET r += $properties
                     """
 
-                    properties = {k: v for k, v in edge_dict.items()
-                                 if k not in ['source_id', 'target_id', 'relation_type']}
+                    properties = {
+                        k: v
+                        for k, v in edge_dict.items()
+                        if k not in ["source_id", "target_id", "relation_type"]
+                    }
 
-                    session.run(simple_cypher,
-                               source_id=edge_dict['source_id'],
-                               target_id=edge_dict['target_id'],
-                               properties=properties)
+                    try:
+                        self._run_with_retry(
+                            session, simple_cypher,
+                            source_id=edge_dict["source_id"],
+                            target_id=edge_dict["target_id"],
+                            properties=properties,
+                        )
+                        edges_written += 1
+                    except Exception as e:
+                        edge_id = edge_dict.get("id", "unknown")
+                        logger.warning(f"Failed to write edge {edge_id}: {e}")
+                        failures.append({
+                            "operation": "write_edge",
+                            "edge_id": edge_id,
+                            "error": str(e),
+                        })
 
-            edges_written += len(batch)
-
-        return edges_written
+        return edges_written, failures
 
     def _convert_edge_properties_for_neo4j(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1027,10 +1143,12 @@ class Neo4jWriter(Writer):
                 """
 
                 try:
-                    session.run(cypher,
-                               source_id=edge.source_id,
-                               target_id=edge.target_id,
-                               properties=edge_props)
+                    self._run_with_retry(
+                                session, cypher,
+                                source_id=edge.source_id,
+                                target_id=edge.target_id,
+                                properties=edge_props,
+                            )
                     edges_written += 1
                 except Exception as e:
                     logger.warning(f"Error writing isA relationship {edge.source_id} -> {edge.target_id}: {e}")
@@ -1091,10 +1209,12 @@ class Neo4jWriter(Writer):
                 """
 
                 try:
-                    session.run(cypher,
-                               source_id=edge.source_id,
-                               target_id=edge.target_id,
-                               properties=edge_props)
+                    self._run_with_retry(
+                                session, cypher,
+                                source_id=edge.source_id,
+                                target_id=edge.target_id,
+                                properties=edge_props,
+                            )
                     edges_written += 1
                 except Exception as e:
                     logger.warning(f"Error writing belongTo relationship {edge.source_id} -> {edge.target_id}: {e}")

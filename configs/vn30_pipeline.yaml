@@ -76,7 +76,7 @@ pipeline:
         template_name: "ner.md"  # Uses NER → STD → TRP pipeline
 
         # Schema Configuration
-        extraction_schema: "knowledge_graphs/schema/financebench_spg.schema"  # SPG schema with edge properties
+        extraction_schema: "knowledge_graphs/schema/financebench_spg.yaml"  # SPG schema with edge properties
 
         # Extraction Mode
         extraction_mode: "multi_step"  # NER → STD → TRP
@@ -110,7 +110,7 @@ pipeline:
         clear_database: false
 
         # Schema Configuration
-        schema_file: "knowledge_graphs/schema/financebench_spg.schema"  # SPG schema
+        schema_file: "knowledge_graphs/schema/financebench_spg.yaml"  # SPG schema
 
         # SPG Settings
         enable_edge_properties: true  # Write edge properties to Neo4j

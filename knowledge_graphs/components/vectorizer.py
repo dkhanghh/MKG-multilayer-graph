@@ -14,6 +14,7 @@ from .base import Vectorizer
 from ..models.graph import SubGraph, Node, Edge
 from ..models.pipeline_state import PipelineState
 from ..utils.registry import register_component
+from ..utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -529,36 +530,43 @@ class OpenAIVectorizer(Vectorizer):
     
     def _generate_openai_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
-        Generate embeddings using OpenAI API.
-        
+        Generate embeddings using OpenAI API with retry for transient errors.
+
         Args:
             texts: List of texts to embed
-            
+
         Returns:
             List of embedding vectors
         """
         all_embeddings = []
-        
+
         # Process in batches
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i:i + self.batch_size]
-            
-            try:
-                response = self.client.embeddings.create(
+            batch_num = i // self.batch_size
+
+            @retry_with_backoff(max_attempts=3, base_delay=2.0, max_delay=30.0)
+            def _call_embeddings_api(input_batch):
+                return self.client.embeddings.create(
                     model=self.model,
-                    input=batch
+                    input=input_batch,
                 )
-                
+
+            try:
+                response = _call_embeddings_api(batch)
                 batch_embeddings = [data.embedding for data in response.data]
                 all_embeddings.extend(batch_embeddings)
-                
+
             except Exception as e:
-                logger.error(f"Error generating embeddings for batch {i//self.batch_size}: {e}")
-                # Add zero embeddings as fallback
+                logger.error(
+                    f"Error generating embeddings for batch {batch_num} "
+                    f"after all retries: {e}"
+                )
+                # Add zero embeddings as fallback after all retries exhausted
                 embedding_dim = 1536 if "ada-002" in self.model else 1024
                 zero_embedding = [0.0] * embedding_dim
                 all_embeddings.extend([zero_embedding] * len(batch))
-        
+
         return all_embeddings
     
     def _create_node_text(self, node: Node) -> str:
@@ -805,7 +813,9 @@ class GeminiVectorizer(Vectorizer):
 
     def _generate_gemini_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
-        Generate embeddings using Gemini API with retry logic for rate limiting.
+        Generate embeddings using Gemini API with retry for transient/rate-limit errors.
+
+        Uses the shared retry_with_backoff utility for consistent retry behavior.
 
         Args:
             texts: List of texts to embed
@@ -813,9 +823,6 @@ class GeminiVectorizer(Vectorizer):
         Returns:
             List of embedding vectors
         """
-        import time
-        import random
-
         all_embeddings = []
 
         # Process in batches
@@ -823,69 +830,42 @@ class GeminiVectorizer(Vectorizer):
             batch = texts[i:i + self.batch_size]
             batch_num = i // self.batch_size
 
-            # Retry logic with exponential backoff
-            for attempt in range(self.max_retries):
-                try:
-                    # Truncate texts that are too long
-                    truncated_batch = []
-                    for text in batch:
-                        # Simple character-based truncation
-                        if len(text) > self.max_tokens * 4:  # Rough estimate: 4 chars per token
-                            text = text[:self.max_tokens * 4]
-                        truncated_batch.append(text)
+            # Truncate texts that are too long
+            truncated_batch = []
+            for text in batch:
+                # Simple character-based truncation (rough estimate: 4 chars per token)
+                if len(text) > self.max_tokens * 4:
+                    text = text[: self.max_tokens * 4]
+                truncated_batch.append(text)
 
-                    # Generate embeddings using Gemini - can handle multiple texts at once
-                    result = self.client.models.embed_content(
-                        model=self.model,
-                        contents=truncated_batch,
-                        config=types.EmbedContentConfig(
-                            task_type="SEMANTIC_SIMILARITY"
-                        )
-                    )
+            @retry_with_backoff(
+                max_attempts=self.max_retries,
+                base_delay=float(self.retry_delay),
+                max_delay=float(self.retry_delay * (2 ** self.max_retries)),
+            )
+            def _call_embed_api(contents):
+                return self.client.models.embed_content(
+                    model=self.model,
+                    contents=contents,
+                    config=types.EmbedContentConfig(
+                        task_type="SEMANTIC_SIMILARITY"
+                    ),
+                )
 
-                    # Extract embeddings from result
-                    batch_embeddings = [embedding.values for embedding in result.embeddings]
-                    all_embeddings.extend(batch_embeddings)
+            try:
+                result = _call_embed_api(truncated_batch)
+                batch_embeddings = [embedding.values for embedding in result.embeddings]
+                all_embeddings.extend(batch_embeddings)
 
-                    # Success - break retry loop
-                    break
-
-                except Exception as e:
-                    error_msg = str(e)
-                    is_rate_limit = "429" in error_msg or "quota" in error_msg.lower() or "rate" in error_msg.lower()
-
-                    if is_rate_limit and attempt < self.max_retries - 1:
-                        # Exponential backoff with jitter
-                        delay = self.retry_delay * (2 ** attempt)
-                        jitter = random.uniform(0, delay * 0.1)  # Add 0-10% jitter
-                        total_delay = delay + jitter
-
-                        logger.warning(
-                            f"Rate limit hit for batch {batch_num} (attempt {attempt + 1}/{self.max_retries}). "
-                            f"Retrying in {total_delay:.1f}s..."
-                        )
-                        time.sleep(total_delay)
-
-                    elif attempt == self.max_retries - 1:
-                        # Max retries reached
-                        logger.error(
-                            f"Max retries ({self.max_retries}) reached for batch {batch_num}. "
-                            f"Error: {error_msg}"
-                        )
-                        # Add zero embeddings as fallback
-                        embedding_dim = 768  # Default dimension for Gemini embeddings
-                        zero_embedding = [0.0] * embedding_dim
-                        all_embeddings.extend([zero_embedding] * len(batch))
-                        break
-
-                    else:
-                        # Not a rate limit error, fail immediately
-                        logger.error(f"Error generating embeddings for batch {batch_num}: {e}")
-                        # Add zero embeddings as fallback
-                        embedding_dim = 768
-                        zero_embedding = [0.0] * embedding_dim
-                        all_embeddings.extend([zero_embedding] * len(batch))
-                        break
+            except Exception as e:
+                logger.error(
+                    f"Error generating Gemini embeddings for batch {batch_num} "
+                    f"after all retries: {e}"
+                )
+                # Add zero embeddings as fallback after all retries exhausted
+                embedding_dim = 768  # Default dimension for Gemini embeddings
+                zero_embedding = [0.0] * embedding_dim
+                all_embeddings.extend([zero_embedding] * len(batch))
 
         return all_embeddings
 
