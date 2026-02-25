@@ -1,26 +1,31 @@
-# Use an official Python runtime as a parent image
-FROM python:3.11-slim
+# ── Build stage ───────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
 
-# Set the working directory in the container
 WORKDIR /app
 
-# Install system dependencies
-# gcc and python3-dev might be needed for some python packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file into the container at /app
-COPY requirements.txt .
+COPY pyproject.toml .
+# Install dependencies only (no project code yet) for layer caching
+RUN pip install --no-cache-dir --user .
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# ── Runtime stage ────────────────────────────────────────────────────
+FROM python:3.11-slim
 
-# Copy the current directory contents into the container at /app
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Copy project source
 COPY . .
 
-# Expose port 8000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
 EXPOSE 8000
 
-# Run the application
 CMD ["uvicorn", "run_server:app", "--host", "0.0.0.0", "--port", "8000"]

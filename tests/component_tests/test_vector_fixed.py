@@ -2,7 +2,7 @@
 import os
 os.environ["EMBEDDING_MODEL"] = "sentence-transformers/all-mpnet-base-v2"
 
-from chatbot_graphs.rag_graph import get_retriever
+from rag.retrievers import get_retriever
 import time
 
 print("Getting retriever with 768-dim model...")

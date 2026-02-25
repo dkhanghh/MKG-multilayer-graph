@@ -195,13 +195,13 @@ For questions and support:
 ```
 thesis-llms-multilayer-graph/
 ├── knowledge_graphs/      # Core knowledge graph pipeline
-├── chatbot_graphs/        # RAG chatbot implementation
-├── agents/                # Agent implementations
+├── rag/                   # RAG chatbot implementation
+├── server/                # FastAPI server
+│   └── core/              # Settings, LLM factory, DB manager
 ├── data/                  # Data files
 │   ├── financebench/      # FinanceBench dataset
 │   └── output/            # Pipeline outputs
 ├── scripts/               # Utility scripts
-│   ├── debug/             # Debug scripts
 │   ├── utilities/         # Helper scripts
 │   └── servers/           # Server scripts
 ├── tests/                 # Test suite

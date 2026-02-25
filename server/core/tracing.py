@@ -1,11 +1,12 @@
 """LangSmith tracing configuration."""
-import os
 import logging
+import os
 from typing import Optional
+
+from server.core.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Try to import LangSmith, make optional
 try:
     from langsmith import Client
     HAS_LANGSMITH = True
@@ -14,47 +15,41 @@ except ImportError:
     logger.info("LangSmith not available")
 
 
-def setup_langsmith_tracing() -> Optional[any]:
-    """
-    Setup LangSmith tracing configuration.
+def setup_langsmith_tracing() -> Optional[Client]:
+    """Setup LangSmith tracing configuration.
 
     Returns:
-        LangSmith Client instance or None if not available
+        LangSmith Client instance or None if not available/configured.
     """
     if not HAS_LANGSMITH:
         logger.info("LangSmith tracing disabled (not installed)")
         return None
 
-    # Get LangSmith configuration from environment
-    langsmith_api_key = os.getenv("LANGSMITH_API_KEY")
-    langsmith_project = os.getenv("LANGSMITH_PROJECT", "kag-langgraph-server")
-    langsmith_endpoint = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+    settings = get_settings()
 
-    if not langsmith_api_key:
-        logger.warning("LANGSMITH_API_KEY not set. LangSmith tracing disabled.")
+    if not settings.LANGSMITH_API_KEY:
+        logger.warning("LANGSMITH_API_KEY not set — tracing disabled")
         return None
 
     try:
-        # Initialize LangSmith client
         client = Client(
-            api_url=langsmith_endpoint,
-            api_key=langsmith_api_key
+            api_url=settings.LANGSMITH_ENDPOINT,
+            api_key=settings.LANGSMITH_API_KEY,
         )
 
-        # Set environment variables for LangChain integration
         os.environ["LANGCHAIN_TRACING_V2"] = "true"
-        os.environ["LANGCHAIN_PROJECT"] = langsmith_project
-        os.environ["LANGCHAIN_ENDPOINT"] = langsmith_endpoint
-        os.environ["LANGCHAIN_API_KEY"] = langsmith_api_key
+        os.environ["LANGCHAIN_PROJECT"] = settings.LANGSMITH_PROJECT
+        os.environ["LANGCHAIN_ENDPOINT"] = settings.LANGSMITH_ENDPOINT
+        os.environ["LANGCHAIN_API_KEY"] = settings.LANGSMITH_API_KEY
 
-        logger.info(f"LangSmith tracing enabled for project: {langsmith_project}")
+        logger.info("LangSmith tracing enabled for project: %s", settings.LANGSMITH_PROJECT)
         return client
-    except Exception as e:
-        logger.error(f"Failed to initialize LangSmith: {e}")
+    except Exception as exc:
+        logger.error("Failed to initialise LangSmith: %s", exc)
         return None
 
 
-# Create traceable decorator (fallback if LangSmith not available)
+# Traceable decorator (no-op fallback if LangSmith unavailable)
 if HAS_LANGSMITH:
     from langsmith import traceable
 else:

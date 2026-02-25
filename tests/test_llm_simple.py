@@ -87,7 +87,7 @@ except Exception as e:
 
 print("\n" + "="*60)
 print("\nTo fix:")
-print("1. Create a .env file in chatbot_graphs/ directory")
+print("1. Create a .env file in the project root directory")
 print("2. Add: OPENAI_BASE_URL=https://llm.duykhangh.net/v1")
 print("3. Add: OPENAI_API_KEY=your_actual_key")
 print("4. Or export as environment variables")

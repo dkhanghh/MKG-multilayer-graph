@@ -2,7 +2,7 @@
   "dependencies": ["."],
   "graphs": {
     "kag_pipeline": "run_server:graph",
-    "rag_chatbot": "chatbot_graphs:graph"
+    "rag_chatbot": "rag:graph"
   },
   "env": ".env"
 }

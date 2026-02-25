@@ -27,8 +27,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -36,52 +34,74 @@ classifiers = [
 ]
 
 dependencies = [
-    # Core LangGraph dependencies
+    # Core LangGraph / LangChain
     "langgraph>=0.0.40",
     "langgraph-cli[inmem]>=0.4.0",
     "langchain-core>=0.1.0",
     "langchain-openai>=0.1.0",
-    # LangSmith tracing
     "langsmith>=0.1.0",
     "langchain>=0.1.0",
+
+    # LLM providers (OpenAI is core)
+    "openai>=1.0.0",
+
     # Document processing
     "pypdf>=3.0.0",
     "python-docx>=0.8.11",
     "python-pptx>=0.6.21",
-    # Machine Learning
-    "sentence-transformers>=2.2.0",
-    "openai>=1.0.0",
-    "ollama>=0.1.7",
-    "google-genai>=1.36.0",
-    "nltk>=3.8.0",
+
     # Data processing
     "pandas>=1.5.0",
     "numpy>=1.24.0",
-    "scikit-learn>=1.3.0",
+    "nltk>=3.8.0",
+
     # Configuration and utilities
     "pyyaml>=6.0",
     "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
     "click>=8.0.0",
     "tqdm>=4.65.0",
     "requests>=2.31.0",
     "jinja2>=3.0.0",
-    # Web server dependencies
+
+    # Web server
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "python-multipart>=0.0.6",
     "python-dotenv>=1.0.0",
-    # Graph database support
+    "pyjwt>=2.8.0",
+
+    # Graph database
     "neo4j>=5.0.0",
-    # Evaluation dependencies
-    "pymilvus>=2.6.2",
-    "deepeval>=3.6.7",
-    "datasets>=4.2.0",
-    "ipywidgets>=8.1.7",
+
+    # MCP integration
     "mcp[cli]>=1.25.0",
     "langchain-mcp-adapters>=0.2.1",
+    "nest-asyncio>=1.5.0",
+
+    # Timezone
+    "pytz>=2023.3",
 ]
 
 [project.optional-dependencies]
+gemini = [
+    "google-genai>=1.36.0",
+]
+ollama = [
+    "ollama>=0.1.7",
+]
+embeddings = [
+    "sentence-transformers>=2.2.0",
+    "scikit-learn>=1.3.0",
+]
+eval = [
+    "deepeval>=3.6.7",
+    "datasets>=4.2.0",
+    "pymilvus>=2.6.2",
+    "ipywidgets>=8.1.7",
+    "matplotlib>=3.10.8",
+    "seaborn>=0.13.2",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -92,22 +112,19 @@ dev = [
     "mypy>=1.0.0",
     "isort>=5.12.0",
 ]
-
 test = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.10.0",
 ]
-
 docs = [
     "sphinx>=5.0.0",
     "sphinx-rtd-theme>=1.2.0",
     "sphinx-autodoc-typehints>=1.19.0",
 ]
-
 all = [
-    "thesis-llms-multilayer-graph[dev,test,docs]",
+    "thesis-llms-multilayer-graph[gemini,ollama,embeddings,eval,dev,docs]",
 ]
 
 [project.urls]
@@ -117,17 +134,17 @@ Issues = "https://github.com/duykhang2211/thesis-llms-multilayer-graph/issues"
 
 [project.scripts]
 kg-pipeline = "knowledge_graphs.cli:main"
-chatbot = "chatbot_graphs.cli:main"
+chatbot = "rag.cli:main"
 
 [tool.setuptools]
-packages = ["knowledge_graphs", "chatbot_graphs", "agents", "utils"]
+packages = ["knowledge_graphs", "rag", "server"]
 
 [tool.setuptools.package-data]
-"*" = ["*.yaml", "*.yml", "*.json"]
+"*" = ["*.yaml", "*.yml", "*.json", "*.md", "*.schema"]
 
 [tool.black]
 line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312']
+target-version = ['py311', 'py312']
 include = '\.pyi?$'
 exclude = '''
 /(
@@ -138,6 +155,7 @@ exclude = '''
   | build
   | dist
   | \.eggs
+  | node_modules
 )/
 '''
 
@@ -160,7 +178,8 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--cov=knowledge_graphs",
-    "--cov=chatbot_graphs",
+    "--cov=rag",
+    "--cov=server",
     "--cov-report=term-missing",
     "--cov-report=html",
 ]
@@ -172,7 +191,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["knowledge_graphs", "chatbot_graphs", "agents", "utils"]
+source = ["knowledge_graphs", "rag", "server"]
 omit = [
     "*/tests/*",
     "*/test_*.py",
@@ -211,6 +230,7 @@ module = [
     "neo4j.*",
     "pymilvus.*",
     "deepeval.*",
+    "nest_asyncio.*",
 ]
 ignore_missing_imports = true
 
@@ -225,6 +245,7 @@ exclude = [
     ".venv",
     ".pytest_cache",
     "*.egg-info",
+    "node_modules",
 ]
 per-file-ignores = [
     "__init__.py:F401",

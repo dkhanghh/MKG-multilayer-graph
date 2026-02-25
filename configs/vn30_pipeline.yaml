@@ -1,0 +1,126 @@
+# FinanceBench Financial Statement Extraction Pipeline
+# Uses 3-step extraction: NER → STD → TRP with SPG edge properties
+
+pipeline:
+  name: "vn30_extraction_pipeline"
+  description: "VN30 financial statement extraction with Semantic Property Graph (SPG) schema"
+  version: "1.0"
+
+  # Global pipeline settings
+  max_workers: 4
+  batch_size: 10
+  timeout: 3600  # 1 hour timeout
+
+  # Global configuration
+  global_config:
+    log_level: "INFO"
+    output_dir: "./output/vn30"
+
+  # Component configurations
+  components:
+    # Scanner: Discover FinanceBench files
+    scanner:
+      type: "file_scanner"
+      enabled: true
+      config:
+        input_paths:
+          - "/.data/company/VCB_2024.csv"
+        verify_exists: true
+
+    # Reader: Parse FinanceBench format
+    reader:
+      type: "csv_reader"
+      enabled: true
+      config:
+        encoding: "utf-8"
+        content_column: "content"
+        id_column: "_id"
+        metadata_columns:
+          - "company_code"
+          - "company_name"
+          - "company_group"
+          - "year"
+          - "quarter"
+          - "report_type"
+          - "language"
+          - "is_tabular_data"
+          - "pdf_file_name"
+          - "source_location"
+        embedding_column: "content_vector"
+        use_existing_embeddings: true
+        skip_empty_content: true
+
+    # Splitter: Preserve page structure (optional - can skip if using page-based reader)
+    splitter:
+      type: "length_splitter"
+      enabled: false  # Disabled - each CSV row is already appropriately sized
+      config:
+        chunk_size: 1000
+        chunk_overlap: 100
+
+    # Extractor: 3-step NER → STD → TRP extraction
+    extractor:
+      type: "llm_extractor"
+      enabled: true
+      config:
+        # LLM Configuration
+        llm_provider: "openai"  # Or "ollama"
+        model: "gemini-2.5-flash"  # Or "gpt-4", "gpt-3.5-turbo"
+        api_key: "AIzaSyAeuiJFOWfpNFU0gSArUgVFHoJENdrwpUQ"  # Environment variable
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"  # Optional: custom endpoint
+        temperature: 0.1  # Low temperature for accuracy
+        max_tokens: 10000  # Large context for financial data
+
+        # Template Configuration
+        use_template: true
+        template_name: "ner.md"  # Uses NER → STD → TRP pipeline
+
+        # Schema Configuration
+        extraction_schema: "knowledge_graphs/schema/financebench_spg.schema"  # SPG schema with edge properties
+
+        # Extraction Mode
+        extraction_mode: "multi_step"  # NER → STD → TRP
+        extract_edge_properties: true  # Enable SPG edge property extraction
+
+        # Batch Processing
+        batch_size: 5  # Process 5 chunks in parallel
+
+    # Vectorizer: Generate embeddings
+    vectorizer:
+      type: "gemini_vectorizer"  # Or "sentence_transformer_vectorizer"
+      enabled: true
+      config:
+        model: "gemini-embedding-001"  # Or "all-MiniLM-L6-v2"
+        embedding_dim: 768
+        batch_size: 10
+        embed_chunks: true  # Embed chunk content
+        embed_entities: true  # Embed entity names/descriptions
+        normalize_embeddings: true
+
+    # Writer: Output to Neo4j
+    writer:
+      type: "neo4j_writer"
+      enabled: true
+      config:
+        # Neo4j Connection
+        uri: "bolt://localhost:7687"  # e.g., "bolt://localhost:7687"
+        username: "neo4j"  # e.g., "neo4j"
+        password: "neo4j@openspg"
+        database: "vn301"  # Database name
+        clear_database: false
+
+        # Schema Configuration
+        schema_file: "knowledge_graphs/schema/financebench_spg.schema"  # SPG schema
+
+        # SPG Settings
+        enable_edge_properties: true  # Write edge properties to Neo4j
+        collapse_financial_metrics: true  # Use SPG approach (edge properties)
+
+        # Write Settings
+        batch_size: 100
+        create_indexes: true  # Create indexes for performance
+        create_constraints: true  # Create uniqueness constraints
+
+        # Optional: Export to JSON as well
+        export_json: false
+        json_output_path: "./output/vn30_graph.json"

@@ -2,7 +2,7 @@
 import os
 os.environ["EMBEDDING_MODEL"] = "nomic-embed-text"
 
-from chatbot_graphs.rag_graph import get_retriever
+from rag.retrievers import get_retriever
 import time
 
 print("Getting retriever with Ollama model...")

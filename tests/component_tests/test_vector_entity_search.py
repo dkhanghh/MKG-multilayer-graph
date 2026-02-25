@@ -1,5 +1,5 @@
 """Quick test for vector-based entity search"""
-from chatbot_graphs.rag_graph import get_retriever
+from rag.retrievers import get_retriever
 import time
 
 print("Getting retriever...")

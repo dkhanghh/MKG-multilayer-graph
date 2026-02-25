@@ -126,13 +126,13 @@ ollama serve
 
 ## Files Modified
 
-1. **`chatbot_graphs/rag_graph.py`**:
+1. **`rag/rag_graph.py`**:
    - Added Ollama embedding support
    - Updated `entity_graph_search()` to use vector similarity
    - Added `generate_embedding()` method for both model types
    - Updated `vector_similarity_search()` to use new method
 
-2. **`chatbot_graphs/README.md`**:
+2. **`rag/README.md`**:
    - Added embedding model configuration instructions
    - Added Ollama setup notes
    - Updated vector dimension notes
@@ -142,6 +142,6 @@ ollama serve
 1. **Start Ollama**: `ollama serve`
 2. **Update `.env`**: Set `EMBEDDING_MODEL=nomic-embed-text`
 3. **Test**: `uv run python test_ollama_entity.py`
-4. **Run chatbot**: `uv run chatbot_graphs/rag_graph.py`
+4. **Run chatbot**: `uv run rag/rag_graph.py`
 
 The chatbot will now use vector similarity to find entities, making it much more robust and flexible! 🚀

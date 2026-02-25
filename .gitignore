@@ -7,47 +7,56 @@ wheels/
 *.egg-info
 .coverage
 .coverage.*
-agent_history.gif
-static/browser_history/*.gif
 
 # Virtual environments
 .venv
 venv/
 
-# Environment variables
+# Environment variables (secrets)
 .env
 .env.bak
-# user conf
-conf.yaml
 
+# IDE / editor
 .idea/
+.vscode/
+
+# LangGraph API cache
 .langgraph_api/
 
-# coverage report
+# Coverage reports
 coverage.xml
 coverage/
-.pytest_cache
+htmlcov/
+.pytest_cache/
 
+# macOS
 .DS_Store
 
-# augment rule file
+# Augment
 .augment/
 
-docs/.vibe-coding
-
+# Node
 node_modules/
 
+# Logs
 llm_logs/
 logs/
 
-# pipeline test output and data
+# Pipeline test output and data
 .data/
+output/
 
+# Notebook hidden files
 notebooks/.*
-.vscode
 
-examples
-.deepeval
-configs
-output
-scripts
+# DeepEval cache
+.deepeval/
+
+# User config (not template)
+conf.yaml
+
+# Serena
+.serena/
+
+# VSCode
+.vscode/

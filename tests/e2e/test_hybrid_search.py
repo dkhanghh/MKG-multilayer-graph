@@ -12,7 +12,7 @@ Results are fused using Reciprocal Rank Fusion (RRF) for optimal ranking.
 
 import os
 from dotenv import load_dotenv
-from chatbot_graphs.rag_graph import get_retriever
+from rag.retrievers import get_retriever
 
 # Load environment variables
 load_dotenv()

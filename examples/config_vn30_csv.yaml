@@ -1,0 +1,88 @@
+pipeline:
+  name: "VN30 Financial Reports CSV Ingestion"
+  description: "Knowledge graph extraction from VN30 financial CSV data"
+  version: "1.0"
+
+  components:
+    scanner:
+      type: "file_scanner"
+      enabled: true
+      config:
+        verify_exists: true
+
+    reader:
+      type: "csv_reader"
+      enabled: true
+      config:
+        encoding: "utf-8"
+        content_column: "content"
+        id_column: "_id"
+        metadata_columns:
+          - "company_code"
+          - "company_name"
+          - "company_group"
+          - "year"
+          - "quarter"
+          - "report_type"
+          - "language"
+          - "is_tabular_data"
+          - "pdf_file_name"
+          - "source_location"
+        embedding_column: "content_vector"
+        use_existing_embeddings: true
+        skip_empty_content: true
+        # Optional: Filter to specific company or year
+        # Uncomment and modify to filter data
+        # filter_conditions:
+        #   company_code: "VPB"
+        #   year: "2023"
+
+    splitter:
+      type: "length_splitter"
+      enabled: false  # Disabled - each CSV row is already appropriately sized
+      config:
+        chunk_size: 1000
+        chunk_overlap: 100
+
+    extractor:
+      type: "llm_extractor"
+      enabled: true
+      config:
+        llm_provider: "openai"
+        model: "gpt-4"
+        api_key: "${OPENAI_API_KEY}"
+        temperature: 0.1
+        entity_types:
+          - "Company"
+          - "Financial_Metric"
+          - "Time_Period"
+          - "Report_Section"
+          - "Currency_Amount"
+          - "Person"
+          - "Organization"
+        relation_types:
+          - "reports"
+          - "has_metric"
+          - "in_period"
+          - "part_of"
+          - "measures"
+          - "owns"
+          - "operates_in"
+        batch_size: 5
+        max_retries: 3
+
+    vectorizer:
+      type: "embedding_vectorizer"
+      enabled: false  # Disabled - using existing embeddings from CSV
+      config:
+        model_name: "all-MiniLM-L6-v2"
+        batch_size: 32
+
+    writer:
+      type: "csv_writer"
+      enabled: true
+      config:
+        output_path: "./output/vn30_knowledge_graph"
+        nodes_file: "nodes.csv"
+        edges_file: "edges.csv"
+        include_metadata: true

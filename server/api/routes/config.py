@@ -1,82 +1,64 @@
 """Configuration endpoints."""
-from fastapi import APIRouter, HTTPException
+import logging
 import os
+
+from fastapi import APIRouter
 from pydantic import BaseModel
 
-from server.core.config import DEFAULT_CONFIG
+from server.api.exceptions import APIError, NotFoundError
+from server.core.config import get_default_config
 from knowledge_graphs.pipeline.langgraph_executor import PipelineWorkflow
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/config")
-async def get_default_config():
-    """
-    Get the default pipeline configuration.
-
-    Returns:
-        Default pipeline configuration dictionary
-    """
-    return {"config": DEFAULT_CONFIG}
+async def get_config():
+    """Get the default pipeline configuration."""
+    return {"config": get_default_config()}
 
 
 @router.get("/components")
 async def list_components():
-    """
-    List available pipeline components.
-
-    Returns:
-        Dictionary with component information
-
-    Raises:
-        HTTPException: If component listing fails
-    """
+    """List available pipeline components."""
     try:
-        # Create a temporary workflow to get component information
-        workflow = PipelineWorkflow(config=DEFAULT_CONFIG)
+        workflow = PipelineWorkflow(config=get_default_config())
         info = workflow.get_pipeline_info()
-
-        return {
-            "components": info["components"],
-            "total_components": info["workflow_nodes"]
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"components": info["components"], "total_components": info["workflow_nodes"]}
+    except Exception as exc:
+        logger.exception("Failed to list components")
+        raise APIError(detail="Could not list pipeline components")
 
 
 class SchemaUpdate(BaseModel):
     content: str
 
 
+_SCHEMA_PATH = "knowledge_graphs/schema/financebench_spg.schema"
+
+
 @router.get("/schema")
 async def get_schema():
-    """
-    Get the custom schema definition.
-    """
-    path = "knowledge_graphs/schema/financebench_spg.schema"
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Schema file not found")
+    """Get the custom schema definition."""
+    if not os.path.exists(_SCHEMA_PATH):
+        raise NotFoundError(detail="Schema file not found")
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return {"content": content}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
+            return {"content": f.read()}
+    except Exception as exc:
+        logger.exception("Failed to read schema")
+        raise APIError(detail="Could not read schema file")
 
 
 @router.post("/schema")
 async def update_schema(update: SchemaUpdate):
-    """
-    Update the custom schema definition.
-    """
-    path = "knowledge_graphs/schema/financebench_spg.schema"
+    """Update the custom schema definition."""
     try:
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
-        with open(path, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(_SCHEMA_PATH), exist_ok=True)
+        with open(_SCHEMA_PATH, "w", encoding="utf-8") as f:
             f.write(update.content)
         return {"status": "success", "message": "Schema updated successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        logger.exception("Failed to update schema")
+        raise APIError(detail="Could not update schema file")
