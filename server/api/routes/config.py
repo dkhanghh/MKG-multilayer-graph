@@ -2,15 +2,18 @@
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
+import yaml
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from knowledge_graphs.models.schema import DomainSchema
+from knowledge_graphs.pipeline.config import save_config
 from knowledge_graphs.pipeline.langgraph_executor import PipelineWorkflow
 from server.api.exceptions import APIError, NotFoundError
 from server.core.config import get_default_config
+from server.core.settings import get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -18,8 +21,35 @@ logger = logging.getLogger(__name__)
 
 @router.get("/config")
 async def get_config():
-    """Get the default pipeline configuration."""
-    return {"config": get_default_config()}
+    """Get the pipeline configuration from the YAML file on disk."""
+    settings = get_settings()
+    config_path = settings.PIPELINE_CONFIG_PATH
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f)
+            return {"config": raw, "path": config_path}
+        except Exception as exc:
+            logger.exception("Failed to read pipeline config")
+            raise APIError(detail="Could not read pipeline configuration file")
+    return {"config": get_default_config(), "path": None}
+
+
+class ConfigUpdate(BaseModel):
+    config: Dict[str, Any]
+
+
+@router.post("/config")
+async def update_config(update: ConfigUpdate):
+    """Update the pipeline configuration YAML file."""
+    settings = get_settings()
+    config_path = settings.PIPELINE_CONFIG_PATH
+    try:
+        save_config(update.config, config_path)
+        return {"status": "success", "message": "Configuration saved", "path": config_path}
+    except Exception as exc:
+        logger.exception("Failed to save pipeline config")
+        raise APIError(detail="Could not save pipeline configuration")
 
 
 @router.get("/components")

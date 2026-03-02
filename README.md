@@ -1,221 +1,208 @@
-# KAG-LangGraph: Portable Knowledge Graph Construction Pipeline
+# Multilayer Graph RAG: Knowledge Graph Construction & Retrieval-Augmented Generation
 
-A simplified, portable version of the KAG (Knowledge Augmented Generation) pipeline that uses LangGraph instead of NetworkX for workflow orchestration.
+A full-stack system for building knowledge graphs from financial documents and querying them with a RAG chatbot. Built on LangGraph, Neo4j, and FastAPI.
 
-## Overview
-
-KAG-LangGraph provides a complete pipeline for converting documents into knowledge graphs:
+## What It Does
 
 ```
-Documents → Scanner → Reader → Splitter → Extractor → Vectorizer → Writer → Knowledge Graph
+Documents (PDF/CSV/TXT) → KG Pipeline → Neo4j SPG Knowledge Graph
+                                                    ↓
+                     User Question → ReAct Agent → Hybrid Search → Answer
 ```
 
-### Key Features
+**Knowledge Graph Pipeline** — Processes financial documents through a 6-stage LangGraph workflow (Scanner → Reader → Splitter → Extractor → Vectorizer → Writer) to build a Semantic Property Graph in Neo4j.
 
-- 🔄 **Stateful Workflows**: Uses LangGraph for robust, stateful pipeline execution
-- 📚 **Multi-format Support**: Process PDF, DOCX, TXT, and other document formats  
-- 🤖 **LLM Integration**: Extract knowledge using OpenAI, Ollama, or other LLM providers
-- 🔌 **Pluggable Components**: Easy to extend and customize pipeline components
-- 💾 **Multiple Output Formats**: Export to JSON, CSV, Neo4j, or custom formats
-- ⚡ **High Performance**: Parallel processing and efficient resource utilization
-- 🛠️ **Easy Configuration**: YAML-based configuration system
+**RAG Chatbot** — A ReAct agent that answers financial questions using hybrid retrieval (vector similarity + keyword + entity graph + chunk text search) fused with Reciprocal Rank Fusion.
+
+**REST API** — FastAPI server exposing both the pipeline and chatbot, with JWT auth, CORS, and a React frontend.
 
 ## Quick Start
+
+### Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) package manager
+- Neo4j 5+ (or use Docker)
 
 ### Installation
 
 ```bash
-pip install -r requirements.txt
-pip install -e .
+# Clone and install
+git clone https://github.com/duykhang2211/thesis-llms-multilayer-graph.git
+cd thesis-llms-multilayer-graph
+uv sync
+
+# With optional dependencies (Gemini embeddings, evaluation tools, etc.)
+uv sync --extra gemini --extra dev --extra eval
 ```
 
-### Basic Usage
-
-1. **Create a configuration file** (`config.yaml`):
-
-```yaml
-pipeline:
-  components:
-    scanner:
-      type: "file_scanner"
-    reader:
-      type: "pdf_reader"
-    splitter:
-      type: "semantic_splitter"
-      chunk_size: 1000
-      chunk_overlap: 200
-    extractor:
-      type: "llm_extractor"
-      model: "gpt-4"
-      api_key: "${OPENAI_API_KEY}"
-    vectorizer:
-      type: "embedding_vectorizer" 
-      model: "all-MiniLM-L6-v2"
-    writer:
-      type: "json_writer"
-      output_path: "./output/knowledge_graph.json"
-```
-
-2. **Run the pipeline**:
-
-```python
-from kag_langgraph import LangGraphExecutor, load_config
-
-# Load configuration
-config = load_config("config.yaml")
-
-# Create and run pipeline
-executor = LangGraphExecutor(config)
-result = executor.run("path/to/your/document.pdf")
-
-print(f"Generated knowledge graph with {len(result.nodes)} nodes and {len(result.edges)} edges")
-```
-
-## Pipeline Components
-
-### Scanner
-Discovers and processes input files:
-- `FileScanner`: Process single files
-- `DirectoryScanner`: Process entire directories
-- Support for filtering by file type, size, etc.
-
-### Reader
-Extracts text content from documents:
-- `PDFReader`: Extract text from PDF files
-- `TXTReader`: Process plain text files  
-- `DOCXReader`: Handle Microsoft Word documents
-- Preserves document structure and metadata
-
-### Splitter
-Breaks documents into manageable chunks:
-- `LengthSplitter`: Split by character/token count
-- `SemanticSplitter`: Intelligent splitting using embeddings
-- Configurable chunk size and overlap
-
-### Extractor
-Extracts structured knowledge from text:
-- `LLMExtractor`: Use language models for entity/relation extraction
-- Customizable prompts and schemas
-- Support for multiple LLM providers
-
-### Vectorizer
-Creates embeddings for semantic search:
-- `EmbeddingVectorizer`: Generate text embeddings
-- Multiple embedding models supported
-- Batch processing for efficiency
-
-### Writer
-Outputs knowledge graphs in various formats:
-- `JSONWriter`: Export to JSON format
-- `CSVWriter`: Export nodes/edges as CSV files
-- `Neo4jWriter`: Direct integration with Neo4j database
-
-## Configuration
-
-The pipeline uses YAML configuration files for easy customization:
-
-```yaml
-pipeline:
-  # Global pipeline settings
-  max_workers: 4
-  batch_size: 100
-  
-  # Component configurations
-  components:
-    extractor:
-      type: "llm_extractor"
-      model: "gpt-4"
-      temperature: 0.1
-      max_tokens: 2000
-      extraction_schema:
-        entities:
-          - "Person"
-          - "Organization" 
-          - "Location"
-        relations:
-          - "works_for"
-          - "located_in"
-          - "founded_by"
-```
-
-## Examples
-
-See the `examples/` directory for complete working examples:
-
-- `basic_pipeline.py`: Simple document processing
-- `batch_processing.py`: Process multiple documents
-- `custom_components.py`: Create custom pipeline components
-- `neo4j_integration.py`: Export to Neo4j database
-
-## Architecture
-
-Built on modern Python technologies:
-
-- **LangGraph**: Stateful workflow orchestration
-- **LangChain**: LLM integration and utilities
-- **Pydantic**: Type-safe data models
-- **Click**: Command-line interface
-- **AsyncIO**: Efficient asynchronous processing
-
-## Development
-
-### Running Tests
+### Configuration
 
 ```bash
-pytest tests/
+# Copy and edit environment variables
+cp .env.example .env
+# Edit .env with your API keys and Neo4j credentials
 ```
 
-### Code Formatting
+Key variables to set:
+- `NEO4J_PASSWORD` — your Neo4j password
+- `OPENAI_API_KEY` — for LLM extraction and chat
+- `GOOGLE_API_KEY` — for Gemini embeddings (if using `gemini` provider)
+
+### Run
 
 ```bash
-black knowledge_graphs/
-flake8 knowledge_graphs/
+# Start the server
+uv run python run_server.py
+
+# Or with hot reload
+uv run uvicorn run_server:app --reload
+
+# Or with LangGraph dev server
+uv run langgraph dev
 ```
 
-## License
+### Docker
 
-Apache 2.0 License - see [LICENSE](LICENSE) for details.
+```bash
+# Start Neo4j + backend + frontend
+docker compose up -d
 
-## Contributing
+# Access:
+#   Backend API:  http://localhost:8000/docs
+#   Frontend:     http://localhost:3000
+#   Neo4j:        http://localhost:7474
+```
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## Support
-
-For questions and support:
-
-- GitHub Issues: [Create an issue](https://github.com/your-org/kag-langgraph/issues)
-- Documentation: [Full docs](https://kag-langgraph.readthedocs.io/)
 ## Project Structure
 
 ```
 thesis-llms-multilayer-graph/
-├── knowledge_graphs/      # Core knowledge graph pipeline
-├── rag/                   # RAG chatbot implementation
-├── server/                # FastAPI server
-│   └── core/              # Settings, LLM factory, DB manager
-├── data/                  # Data files
-│   ├── financebench/      # FinanceBench dataset
-│   └── output/            # Pipeline outputs
-├── scripts/               # Utility scripts
-│   ├── utilities/         # Helper scripts
-│   └── servers/           # Server scripts
-├── tests/                 # Test suite
-│   ├── unit/              # Unit tests
-│   ├── integration/       # Integration tests
-│   ├── e2e/               # End-to-end tests
-│   └── component_tests/   # Component tests
-├── docs/                  # Documentation
-│   ├── guides/            # User guides
-│   ├── api/               # API documentation
-│   └── architecture/      # Architecture docs
-├── configs/               # Configuration files
-├── examples/              # Example code
-└── utils/                 # Global utilities
+├── knowledge_graphs/          # KG construction pipeline
+│   ├── components/            #   Scanner, Reader, Splitter, Extractor, Vectorizer, Writer
+│   ├── models/                #   Chunk, SubGraph, Node, Edge, PipelineState
+│   ├── pipeline/              #   LangGraph executor, batch processors
+│   ├── prompts/               #   LLM extraction prompt templates
+│   ├── schema/                #   SPG schema definitions
+│   └── utils/                 #   Component registry, LLM client, template loader
+├── rag/                       # RAG chatbot
+│   ├── agent.py               #   ReAct agent with tool binding
+│   ├── graph.py               #   LangGraph workflow (agent → END)
+│   ├── state.py               #   ChatState definition
+│   ├── tools/                 #   Neo4j search tools, MCP integration
+│   ├── retrievers/            #   Neo4j retriever (vector + text + entity + graph)
+│   └── prompts/               #   System prompt templates (Jinja2)
+├── server/                    # FastAPI server
+│   ├── api/                   #   Routes, middleware, exception handlers
+│   │   └── routes/            #     health, pipeline, config, auth, chat, graph
+│   └── core/                  #   Settings, LLM factory, Neo4j manager, tracing
+│       ├── settings.py        #     Centralized Pydantic settings
+│       ├── llm.py             #     ChatOpenAI factory
+│       ├── database.py        #     Neo4j singleton manager
+│       └── config.py          #     YAML pipeline config loader
+├── tests/                     # Test suite (unit, e2e, component)
+├── web/                       # React frontend (Vite)
+├── configs/                   # Pipeline YAML configurations
+├── notebooks/                 # Evaluation & exploration notebooks
+├── examples/                  # Example scripts and configs
+├── docs/                      # Documentation and guides
+├── langgraph.json             # LangGraph graph registry
+├── pyproject.toml             # Project metadata and dependencies
+├── docker-compose.yml         # Docker services (Neo4j + backend + frontend)
+├── Dockerfile                 # Backend container
+└── run_server.py              # Main entry point
 ```
 
-See [docs/README.md](docs/README.md) for complete documentation.
+## Architecture
+
+### Three Packages
+
+| Package | Description | Entry Point |
+|---------|-------------|-------------|
+| `knowledge_graphs` | Document → KG pipeline with 6 pluggable components | `LangGraphExecutor` |
+| `rag` | RAG chatbot with ReAct agent and 5 retrieval strategies | `rag:graph` |
+| `server` | FastAPI REST API with JWT auth, centralized settings | `run_server:app` |
+
+### LangGraph Graphs
+
+Defined in `langgraph.json`:
+
+- **`kag_pipeline`** (`run_server:graph`) — Multi-stage document processing pipeline
+- **`rag_chatbot`** (`rag:graph`) — ReAct agent chat workflow
+
+### Retrieval Strategies
+
+The RAG chatbot supports 5 search strategies via `rag/retrievers/`:
+
+1. **Vector similarity search** — semantic matching on entity embeddings
+2. **Typed vector search** — type-filtered search (SPG-aware)
+3. **Entity graph search** — relationship traversal with auto-expansion
+4. **Semantic path search** — multi-hop path discovery between entities
+5. **Question-aware subgraph retrieval** — intelligent subgraph extraction
+
+The default **hybrid search** tool fuses 4 strategies using Reciprocal Rank Fusion (RRF).
+
+### Pipeline Components
+
+```
+Scanner → Reader → Splitter → Extractor → Vectorizer → Writer
+```
+
+Each component is pluggable via YAML config (see `configs/`). The extractor uses a 3-step LLM pipeline: Named Entity Recognition → Standardization → Triple Extraction.
+
+## Development
+
+### Testing
+
+```bash
+# Unit tests
+uv run pytest tests/unit/ -v
+
+# All tests with coverage
+uv run pytest --cov-report=term-missing
+
+# Specific test
+uv run pytest tests/unit/test_llm_factory.py -v
+```
+
+### Code Quality
+
+```bash
+uv run black knowledge_graphs/ rag/ server/ tests/
+uv run isort knowledge_graphs/ rag/ server/ tests/
+uv run flake8 knowledge_graphs/ rag/ server/
+```
+
+### Configuration
+
+Pipeline behavior is controlled by YAML files in `configs/`:
+
+- `financebench_pipeline.yaml` — FinanceBench financial statement processing
+- `vn30_pipeline.yaml` — VN30 Vietnamese stock market data
+
+All environment settings are centralized in `server/core/settings.py` using Pydantic BaseSettings. See `.env.example` for the full list.
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/pipeline/run` | POST | Run KG pipeline on a document |
+| `/pipeline/run-batch` | POST | Batch document processing |
+| `/chat/chat` | POST | Send message to RAG chatbot |
+| `/graph/data` | GET | Get graph visualization data |
+| `/docs` | GET | Swagger API documentation |
+
+## Tech Stack
+
+- **LangGraph** — stateful workflow orchestration
+- **LangChain** — LLM integration (OpenAI, Gemini, Ollama)
+- **Neo4j** — graph database with vector index support
+- **FastAPI** — REST API with async support
+- **Pydantic v2** — settings validation and data models
+- **React + Vite** — frontend web application
+- **Docker** — containerized deployment
+
+## License
+
+Apache 2.0 License — see [LICENSE](LICENSE) for details.
